@@ -1,3 +1,4 @@
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { LanguageModel } from "ai";
@@ -18,6 +19,13 @@ export function createLanguageModel(config: ProviderConfig): LanguageModel {
         baseURL: config.baseUrl,
       });
       return provider.chat(config.modelId);
+    }
+    case "anthropic": {
+      const provider = createAnthropic({
+        apiKey: config.apiKey,
+        baseURL: config.baseUrl,
+      });
+      return provider(config.modelId);
     }
     case "gemini": {
       const provider = createGoogleGenerativeAI({
