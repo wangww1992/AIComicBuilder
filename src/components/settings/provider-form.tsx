@@ -23,7 +23,7 @@ const DEFAULT_BASE_URLS: Record<Protocol, string> = {
   dashscope: "https://dashscope.aliyuncs.com/api/v1",
   minimax: "https://api.minimaxi.com",
   anthropic: "https://api.anthropic.com",
-  ark: "",
+  ark: "https://ark.cn-beijing.volces.com/api/plan/v3",
 };
 
 function getProtocolOptions(capability: Capability): { value: Protocol; label: string }[] {
@@ -41,6 +41,7 @@ function getProtocolOptions(capability: Capability): { value: Protocol; label: s
       { value: "kling", label: "Kling" },
       { value: "dashscope", label: "百炼 (图片)" },
       { value: "minimax", label: "MiniMax" },
+      { value: "ark", label: "火山引擎" },
     ];
   }
   // video
