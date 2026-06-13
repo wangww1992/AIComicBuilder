@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { fetchAnthropicModels } from "@/lib/ai/providers/anthropic-models";
 
 interface ListRequest {
   protocol: string;
@@ -135,6 +136,17 @@ export async function POST(request: Request) {
           { id: "S2V-01", name: "Subject Reference v1" },
         ],
       });
+    }
+
+    if (body.protocol === "anthropic") {
+      if (!body.baseUrl) {
+        return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
+      }
+      if (!body.apiKey) {
+        return NextResponse.json({ error: "API Key is required" }, { status: 400 });
+      }
+      const models = await fetchAnthropicModels(body.baseUrl, body.apiKey);
+      return NextResponse.json({ models });
     }
 
     if (!body.baseUrl) {
