@@ -145,8 +145,29 @@ export async function POST(request: Request) {
       if (!body.apiKey) {
         return NextResponse.json({ error: "API Key is required" }, { status: 400 });
       }
-      const models = await fetchAnthropicModels(body.baseUrl, body.apiKey);
-      return NextResponse.json({ models });
+      try {
+        const models = await fetchAnthropicModels(body.baseUrl, body.apiKey);
+        return NextResponse.json({ models });
+      } catch (err) {
+        // /v1/models can be unavailable on:
+        //   - older Anthropic accounts (the endpoint was added in 2024)
+        //   - proxies / mirrors that don't implement it
+        //   - geo-restricted environments
+        // Fall back to a curated list so the user can still configure
+        // the provider without losing the rest of the form flow.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[models/list] Anthropic /v1/models failed, using static fallback: ${msg}`);
+        return NextResponse.json({
+          models: [
+            { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+            { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
+            { id: "claude-opus-4-7", name: "Claude Opus 4.7" },
+            { id: "claude-3-5-haiku-latest", name: "Claude 3.5 Haiku" },
+            { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet" },
+            { id: "claude-3-opus-latest", name: "Claude 3 Opus" },
+          ],
+        });
+      }
     }
 
     if (!body.baseUrl) {
