@@ -22,6 +22,7 @@ const DEFAULT_BASE_URLS: Record<Protocol, string> = {
   wan: "https://dashscope.aliyuncs.com/api/v1",
   dashscope: "https://dashscope.aliyuncs.com/api/v1",
   minimax: "https://api.minimaxi.com",
+  anthropic: "",
 };
 
 function getProtocolOptions(capability: Capability): { value: Protocol; label: string }[] {
