@@ -50,5 +50,9 @@ next-env.d.ts
 
 run_kling.sh
 
+# desktop launcher runtime artifacts
+.launcher.log
+.launcher.pid
+
 # scratchpad clones (not part of project)
 /tmp/

@@ -194,7 +194,17 @@
     "generateRefPrompts": "生成参考图提示词",
     "batchGenerateRefImages": "批量生成参考图",
     "needTwoVersions": "至少需要2个版本才能对比",
-    "noFrame": "暂无画面"
+    "noFrame": "暂无画面",
+    "deleteVersion": "删除版本",
+    "confirmDeleteVersion": "确定删除版本 {label}？该版本下的所有镜头、对白、参考图都会被一起删掉，无法恢复。",
+    "versionDeleted": "已删除版本 {label}",
+    "preparing": "准备中…",
+    "started": "开始分镜 · {chunks} 块 · 模型 {model} · 版本 {version}",
+    "chunkStart": "正在生成第 {index}/{total} 块…",
+    "chunkDone": "第 {index}/{total} 块完成 · {shots} 个镜头 · 用时 {seconds}s",
+    "chunkError": "第 {index} 块失败：{error}",
+    "saving": "正在保存 {total} 个镜头到数据库…",
+    "done": "完成 · 共 {total} 个镜头 · 版本 {version}"
   },
   "episode": {
     "title": "分集管理",

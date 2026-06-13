@@ -1153,7 +1153,16 @@ async function handleShotSplitStream(
     if (epDur?.targetDuration && epDur.targetDuration > 0) targetDuration = epDur.targetDuration;
   }
 
-  const model = createLanguageModel(modelConfig.text);
+  // Disable thinking for the shot_split LLM call. MiniMax-M3 supports
+  // `thinking: {"type":"disabled"}` to skip the chain-of-thought and
+  // answer directly — without this, M3 spends 60-180s "thinking"
+  // about the shot breakdown, which (a) wastes money on a task that's
+  // mostly mechanical (split scenes into shots) and (b) slows the
+  // whole pipeline. For M2.x this is a no-op (thinking is forced on
+  // by the model). Other providers ignore the unknown field.
+  const model = createLanguageModel(modelConfig.text, {
+    extraBody: { thinking: { type: "disabled" } },
+  });
   const videoMaxDuration = getModelMaxDuration(modelConfig?.video?.modelId);
   const shotSplitSlots = await resolveSlotContents("shot_split", { userId, projectId });
   const shotSplitDef = getPromptDefinition("shot_split")!;
@@ -1193,68 +1202,9 @@ async function handleShotSplitStream(
     referenceImagePrompts?: string[];
   };
 
-  // Process chunks concurrently
-  const chunkResults = await Promise.all(
-    sceneChunks.map(async (chunk, idx) => {
-      let prompt = buildShotSplitPrompt(chunk, characterDescriptions, characterVisualHints, undefined, characterPerformanceStyles.length > 0 ? characterPerformanceStyles : undefined);
-
-      // Inject character relations (drives on-screen interaction framing)
-      if (relationsText) prompt += relationsText;
-
-      // Inject world setting
-      if (projData?.worldSetting) {
-        prompt = `【世界观设定】\n${projData.worldSetting}\n\n所有镜头必须与此世界观设定保持一致。\n\n` + prompt;
-      }
-
-      // Inject target duration
-      if (targetDuration && targetDuration > 0) {
-        prompt += `\n\n目标总时长：${targetDuration}秒（${Math.floor(targetDuration / 60)}分${targetDuration % 60}秒）。请确保所有镜头的时长之和接近此目标。\n`;
-      }
-      try {
-        const result = await generateText({
-          model,
-          system: systemPrompt,
-          prompt,
-          providerOptions: jsonMode,
-          maxOutputTokens: 8192,
-        });
-        const parsed = JSON.parse(extractJSON(result.text));
-        // Handle multiple formats:
-        // 1. Scene-grouped: [{ sceneTitle, shots: [...] }]
-        // 2. Flat with wrapper: { shots: [...] }
-        // 3. Flat array: [{ sequence, ... }]
-        let shotList: ParsedShot[];
-        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].shots) {
-          // Scene-grouped format — flatten shots and inherit scene description
-          shotList = parsed.flatMap((scene: { sceneDescription?: string; shots?: ParsedShot[] }) =>
-            (scene.shots || []).map((s) => ({
-              ...s,
-              sceneDescription: s.sceneDescription || scene.sceneDescription || "",
-            }))
-          );
-        } else if (Array.isArray(parsed)) {
-          shotList = parsed;
-        } else {
-          shotList = parsed.shots || [];
-        }
-        console.log(`[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length}: ${shotList.length} shots, keys: ${shotList[0] ? Object.keys(shotList[0]).join(",") : "empty"}`);
-        return shotList as ParsedShot[];
-      } catch (err) {
-        console.error(`[ShotSplit] Chunk ${idx + 1} failed:`, err);
-        return [] as ParsedShot[];
-      }
-    })
-  );
-
-  // Merge and re-sequence
-  const allShots = chunkResults.flat();
-  allShots.forEach((s, i) => { s.sequence = i + 1; });
-
-  if (allShots.length === 0) {
-    return NextResponse.json({ error: "Failed to generate shots" }, { status: 500 });
-  }
-
-  // Create version record
+  // Create version record UP FRONT so the client can show the version
+  // label as soon as the stream starts (and so a failed mid-stream
+  // generation can be retried against the same version label).
   const versionWhereClause = episodeId
     ? and(eq(storyboardVersions.projectId, projectId), eq(storyboardVersions.episodeId, episodeId))
     : eq(storyboardVersions.projectId, projectId);
@@ -1280,50 +1230,258 @@ async function handleShotSplitStream(
     episodeId: episodeId ?? null,
   });
 
-  for (const shot of allShots) {
-    const shotId = genId();
-    await db.insert(shots).values({
-      id: shotId,
-      projectId,
-      versionId,
-      sequence: shot.sequence,
-      prompt: shot.sceneDescription,
-      motionScript: shot.motionScript,
-      videoScript: shot.videoScript ?? null,
-      cameraDirection: shot.cameraDirection || "static",
-      duration: shot.duration,
-      transitionIn: shot.transitionIn || "cut",
-      transitionOut: shot.transitionOut || "cut",
-      compositionGuide: shot.compositionGuide || "",
-      focalPoint: shot.focalPoint || "",
-      depthOfField: shot.depthOfField || "medium",
-      soundDesign: shot.soundDesign || "",
-      musicCue: shot.musicCue || "",
-      episodeId: episodeId ?? null,
-    });
-    // No automatic asset seeding — shot_assets rows are only created when
-    // the user explicitly clicks "生成首尾帧提示词" or "生成参考图提示词".
-    // Each generation button writes only its own asset type.
+  const modelId =
+    (modelConfig?.text && "modelId" in modelConfig.text
+      ? modelConfig.text.modelId
+      : undefined) || (model as { modelId?: string }).modelId || "unknown";
+  const protocol =
+    (modelConfig?.text && "protocol" in modelConfig.text
+      ? modelConfig.text.protocol
+      : undefined) || "unknown";
 
-    for (let i = 0; i < (shot.dialogues || []).length; i++) {
-      const dialogue = shot.dialogues[i];
-      const matchedChar = shotCharacters.find(
-        (c: typeof characters.$inferSelect) => c.name === dialogue.character
-      );
-      if (matchedChar) {
-        await db.insert(dialogues).values({
-          id: genId(),
-          shotId,
-          characterId: matchedChar.id,
-          text: dialogue.text,
-          sequence: i,
+  // ── NDJSON streaming response ────────────────────────────────────────
+  // Why: M3-class reasoning models can spend 60-180s thinking per call.
+  // A non-streaming JSON response makes the UI look frozen. By emitting
+  // one JSON line per event, the client can show live progress
+  // ("正在生成第 1/2 块… 12.3s") instead of an undifferentiated spinner.
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (event: Record<string, unknown>) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+        } catch {
+          // Controller may already be closed (client disconnected).
+        }
+      };
+
+      try {
+        emit({
+          type: "start",
+          chunks: sceneChunks.length,
+          model: modelId,
+          protocol,
+          versionLabel,
         });
-      }
-    }
-  }
 
-  console.log(`[ShotSplit] Created ${allShots.length} shots from ${sceneChunks.length} chunks`);
-  return NextResponse.json({ shots: allShots.length });
+        // Process chunks in parallel. Both `chunk_start` events fire at
+        // t=0, and the client ticks elapsed time on a 5s timer so the
+        // user sees both chunks progressing in real time. Whichever
+        // finishes first emits its `chunk_done` first.
+        //
+        // AbortController: when ANY chunk errors or times out, we abort
+        // the others so they don't keep the POST hanging on the wire.
+        // Without this, a timeout in chunk 1 would leave chunk 2 waiting
+        // until ITS timeout fires too — total wait = N × CHUNK_TIMEOUT_MS
+        // instead of just CHUNK_TIMEOUT_MS.
+        const abortController = new AbortController();
+        const CHUNK_TIMEOUT_MS = 120_000;
+        // Per-chunk failure reasons, captured so the final `error`
+        // event can include the first one instead of a generic message.
+        const chunkErrorMessages = new Map<number, string>();
+
+        const chunkResults: ParsedShot[][] = await Promise.all(
+          sceneChunks.map(async (chunk, idx) => {
+            let prompt = buildShotSplitPrompt(
+              chunk,
+              characterDescriptions,
+              characterVisualHints,
+              undefined,
+              characterPerformanceStyles.length > 0 ? characterPerformanceStyles : undefined,
+            );
+
+            if (relationsText) prompt += relationsText;
+            if (projData?.worldSetting) {
+              prompt = `【世界观设定】\n${projData.worldSetting}\n\n所有镜头必须与此世界观设定保持一致。\n\n` + prompt;
+            }
+            if (targetDuration && targetDuration > 0) {
+              prompt += `\n\n目标总时长：${targetDuration}秒（${Math.floor(targetDuration / 60)}分${targetDuration % 60}秒）。请确保所有镜头的时长之和接近此目标。\n`;
+            }
+
+            const callStart = Date.now();
+            emit({ type: "chunk_start", index: idx, total: sceneChunks.length });
+            // Hard per-chunk timeout. M3 can hang silently for 5+
+            // minutes when the upstream endpoint is slow or dead.
+            // Without this we'd wait the full route's maxDuration
+            // (300s) before failing — the user would stare at a
+            // spinner for no reason. 120s is generous for a healthy
+            // 8k-prompt reasoning call but well below the route's
+            // own 300s ceiling. Declared outside the try so the
+            // catch can still clear the timer.
+            let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timeoutHandle = setTimeout(
+                () => reject(new Error(`LLM 调用超时 (${CHUNK_TIMEOUT_MS / 1000}s)，请检查模型 endpoint 或换模型`)),
+                CHUNK_TIMEOUT_MS,
+              );
+            });
+            try {
+              console.log(
+                `[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length} → calling LLM (model=${modelId}, protocol=${protocol}, system=${systemPrompt.length}c, prompt=${prompt.length}c)`,
+              );
+              const result = await Promise.race([
+                generateText({
+                  model,
+                  system: systemPrompt,
+                  prompt,
+                  providerOptions: jsonMode,
+                  abortSignal: abortController.signal,
+                  maxOutputTokens: 8192,
+                }),
+                timeoutPromise,
+              ]);
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              const elapsed = Date.now() - callStart;
+              console.log(
+                `[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length} ← LLM returned in ${elapsed}ms (response=${result.text.length}c)`,
+              );
+
+              // Capture token usage so the UI can show "X tok" alongside
+              // each chunk. For reasoning models like M3 the breakdown
+              // matters: `reasoningTokens` is the chain-of-thought
+              // (think block), `textTokens` is the actual JSON output.
+              const u = result.usage;
+              const tokens = {
+                input: u?.inputTokens ?? 0,
+                output: u?.outputTokens ?? 0,
+                total: u?.totalTokens ?? 0,
+                reasoning: u?.outputTokenDetails?.reasoningTokens ?? 0,
+                text: u?.outputTokenDetails?.textTokens ?? 0,
+              };
+              console.log(
+                `[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length} tokens: ` +
+                  `in=${tokens.input}, out=${tokens.output} (reason=${tokens.reasoning}, text=${tokens.text}), total=${tokens.total}`,
+              );
+
+              const parsed = JSON.parse(extractJSON(result.text));
+              let shotList: ParsedShot[];
+              if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].shots) {
+                shotList = parsed.flatMap((scene: { sceneDescription?: string; shots?: ParsedShot[] }) =>
+                  (scene.shots || []).map((s) => ({
+                    ...s,
+                    sceneDescription: s.sceneDescription || scene.sceneDescription || "",
+                  })),
+                );
+              } else if (Array.isArray(parsed)) {
+                shotList = parsed;
+              } else {
+                shotList = parsed.shots || [];
+              }
+              console.log(
+                `[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length}: ${shotList.length} shots, keys: ${shotList[0] ? Object.keys(shotList[0]).join(",") : "empty"}`,
+              );
+              emit({
+                type: "chunk_done",
+                index: idx,
+                total: sceneChunks.length,
+                shots: shotList.length,
+                elapsedMs: elapsed,
+                tokens,
+              });
+              return shotList;
+            } catch (err) {
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(`[ShotSplit] Chunk ${idx + 1} failed:`, err);
+              chunkErrorMessages.set(idx, msg);
+              emit({ type: "chunk_error", index: idx, error: msg });
+              // Abort the OTHER in-flight chunks so we don't sit here
+              // waiting for them to also time out. Without this the
+              // POST hangs on the wire for N × CHUNK_TIMEOUT_MS.
+              // (Note: this aborts the client side of the connection
+              // — the upstream LLM server may keep running and may
+              // keep charging for the abandoned call. We can't fix
+              // that from here, but at least the user stops waiting.)
+              if (!abortController.signal.aborted) {
+                abortController.abort();
+              }
+              return [] as ParsedShot[];
+            }
+          }),
+        );
+
+        // Merge and re-sequence
+        const allShots = chunkResults.flat();
+        allShots.forEach((s, i) => { s.sequence = i + 1; });
+
+        if (allShots.length === 0) {
+          // Surface the first chunk's actual failure reason (timeout,
+          // parse error, etc.) rather than a generic "failed" string,
+          // so the user's toast tells them WHAT went wrong.
+          const firstFailure = chunkResults.findIndex((r) => r.length === 0);
+          const reason =
+            chunkErrorMessages.get(firstFailure) ?? "所有分块均失败";
+          emit({ type: "error", message: reason });
+          return;
+          return;
+        }
+
+        emit({ type: "saving", total: allShots.length });
+
+        for (const shot of allShots) {
+          const shotId = genId();
+          await db.insert(shots).values({
+            id: shotId,
+            projectId,
+            versionId,
+            sequence: shot.sequence,
+            prompt: shot.sceneDescription,
+            motionScript: shot.motionScript,
+            videoScript: shot.videoScript ?? null,
+            cameraDirection: shot.cameraDirection || "static",
+            duration: shot.duration,
+            transitionIn: shot.transitionIn || "cut",
+            transitionOut: shot.transitionOut || "cut",
+            compositionGuide: shot.compositionGuide || "",
+            focalPoint: shot.focalPoint || "",
+            depthOfField: shot.depthOfField || "medium",
+            soundDesign: shot.soundDesign || "",
+            musicCue: shot.musicCue || "",
+            episodeId: episodeId ?? null,
+          });
+
+          for (let i = 0; i < (shot.dialogues || []).length; i++) {
+            const dialogue = shot.dialogues[i];
+            const matchedChar = shotCharacters.find(
+              (c: typeof characters.$inferSelect) => c.name === dialogue.character,
+            );
+            if (matchedChar) {
+              await db.insert(dialogues).values({
+                id: genId(),
+                shotId,
+                characterId: matchedChar.id,
+                text: dialogue.text,
+                sequence: i,
+              });
+            }
+          }
+        }
+
+        console.log(
+          `[ShotSplit] Created ${allShots.length} shots from ${sceneChunks.length} chunks (version ${versionLabel})`,
+        );
+        emit({ type: "done", totalShots: allShots.length, versionLabel });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[ShotSplit] Stream error:", err);
+        emit({ type: "error", message: msg });
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          // Already closed.
+        }
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Transfer-Encoding": "chunked",
+      "Cache-Control": "no-cache",
+    },
+  });
 }
 
 /** Split screenplay text into chunks by SCENE markers, ~maxScenes per chunk.

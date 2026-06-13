@@ -192,7 +192,17 @@
     "generateRefPrompts": "Generate Ref Prompts",
     "batchGenerateRefImages": "Batch Generate Ref Images",
     "needTwoVersions": "Need at least 2 versions to compare",
-    "noFrame": "No frame"
+    "noFrame": "No frame",
+    "deleteVersion": "Delete version",
+    "confirmDeleteVersion": "Delete version {label}? All shots, dialogues, and assets under it will be removed. This cannot be undone.",
+    "versionDeleted": "Deleted version {label}",
+    "preparing": "Preparing…",
+    "started": "Starting storyboard · {chunks} chunk(s) · model {model} · version {version}",
+    "chunkStart": "Generating chunk {index}/{total}…",
+    "chunkDone": "Chunk {index}/{total} done · {shots} shot(s) · {seconds}s",
+    "chunkError": "Chunk {index} failed: {error}",
+    "saving": "Saving {total} shot(s) to database…",
+    "done": "Done · {total} shot(s) · version {version}"
   },
   "episode": {
     "title": "Episodes",

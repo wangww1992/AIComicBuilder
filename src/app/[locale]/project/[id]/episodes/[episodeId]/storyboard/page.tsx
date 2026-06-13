@@ -34,6 +34,7 @@ import {
   List,
   ChevronDown,
   GitCompare,
+  Trash2,
 } from "lucide-react";
 import { InlineModelPicker } from "@/components/editor/model-selector";
 import { VideoRatioPicker } from "@/components/editor/video-ratio-picker";
@@ -59,6 +60,63 @@ export default function EpisodeStoryboardPage() {
   const [generatingSceneFrames, setGeneratingSceneFrames] = useState(false);
   const [generatingRefImages, setGeneratingRefImages] = useState(false);
   const [generatingVideoPrompts, setGeneratingVideoPrompts] = useState(false);
+  // Live progress for the shot_split streaming response (M3 reasoning
+  // models can take 60-180s per chunk; without this the button just
+  // spins silently).
+  const [generatingStatus, setGeneratingStatus] = useState<string | null>(null);
+  // Per-chunk state for the parallel-execution UI: keeps start time,
+  // status, and token counts so the button can show "块 1 ✓ 60s 2340tok
+  // · 块 2 … 38s" and tick every 5s while waiting.
+  type TokenInfo = {
+    input: number;
+    output: number;
+    total: number;
+    reasoning: number;
+    text: number;
+  };
+  type ChunkProgress = {
+    index: number;
+    status: "running" | "done" | "error";
+    startTime: number;
+    elapsedMs?: number;
+    shots?: number;
+    tokens?: TokenInfo;
+    error?: string;
+  };
+  const [chunkProgress, setChunkProgress] = useState<ChunkProgress[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+
+  // 5s ticker: while we're generating and have at least one chunk
+  // still running, bump `now` so the elapsed-seconds displayed in the
+  // button increments without waiting for the next server event.
+  useEffect(() => {
+    if (!generating) return;
+    const anyRunning = chunkProgress.some((c) => c.status === "running");
+    if (!anyRunning) return;
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, [generating, chunkProgress]);
+
+  const liveButtonStatus = useMemo(() => {
+    if (!generating) return null;
+    if (chunkProgress.length === 0) return null;
+    const fmt = (s: number) => `${Math.max(0, Math.floor(s / 1000))}s`;
+    const parts = chunkProgress.map((c) => {
+      const elapsed = c.elapsedMs ?? (now - c.startTime);
+      const tag = `块 ${c.index + 1}`;
+      if (c.status === "done") {
+        const tok = c.tokens
+          ? ` · ${c.tokens.total} tok${c.tokens.reasoning ? `(思${c.tokens.reasoning})` : ""}`
+          : "";
+        return `${tag} ✓ ${c.shots ?? 0} 镜头 · ${fmt(elapsed)}${tok}`;
+      }
+      if (c.status === "error") {
+        return `${tag} ✗ ${c.error ?? "失败"}`;
+      }
+      return `${tag} … ${fmt(elapsed)}`;
+    });
+    return `并行 ${chunkProgress.length} 块 · ${parts.join(" · ")}`;
+  }, [chunkProgress, now, generating]);
   const [sceneFramesOverwrite, setSceneFramesOverwrite] = useState(false);
   const [generatingFramesOverwrite, setGeneratingFramesOverwrite] = useState(false);
   const [generatingVideosOverwrite, setGeneratingVideosOverwrite] = useState(false);
@@ -197,6 +255,9 @@ export default function EpisodeStoryboardPage() {
     if (!project) return;
     if (!textGuard()) return;
     setGenerating(true);
+    setGeneratingStatus(t("storyboard.preparing"));
+    setChunkProgress([]);
+    setNow(Date.now());
 
     try {
       const response = await apiFetch(`/api/projects/${project.id}/generate`, {
@@ -209,12 +270,117 @@ export default function EpisodeStoryboardPage() {
         }),
       });
 
+      // Server streams NDJSON events. We track per-chunk state in
+      // `chunkProgress` and let `liveButtonStatus` (a useMemo) format
+      // the button text from it. `now` ticks every 5s via a separate
+      // useEffect so in-flight elapsed-seconds keep incrementing even
+      // when no server event arrives.
       if (response.body) {
         const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let startMeta: { chunks: number; model: string; versionLabel: string } | null = null;
+        let totalTokens = 0;
+
         while (true) {
-          const { done } = await reader.read();
+          const { done, value } = await reader.read();
           if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let event: { type: string; [k: string]: unknown };
+            try {
+              event = JSON.parse(line);
+            } catch {
+              continue;
+            }
+            switch (event.type) {
+              case "start": {
+                startMeta = {
+                  chunks: event.chunks as number,
+                  model: event.model as string,
+                  versionLabel: event.versionLabel as string,
+                };
+                setGeneratingStatus(
+                  t("storyboard.started", {
+                    chunks: event.chunks as number,
+                    model: event.model as string,
+                    version: event.versionLabel as string,
+                  }),
+                );
+                break;
+              }
+              case "chunk_start": {
+                const idx = event.index as number;
+                setChunkProgress((prev) => {
+                  // Initialize or no-op if already there.
+                  if (prev.some((c) => c.index === idx)) return prev;
+                  return [...prev, { index: idx, status: "running", startTime: Date.now() }];
+                });
+                setNow(Date.now());
+                break;
+              }
+              case "chunk_done": {
+                const idx = event.index as number;
+                const tokens = event.tokens as
+                  | { input: number; output: number; total: number; reasoning: number; text: number }
+                  | undefined;
+                if (tokens?.total) totalTokens += tokens.total;
+                setChunkProgress((prev) =>
+                  prev.map((c) =>
+                    c.index === idx
+                      ? {
+                          ...c,
+                          status: "done" as const,
+                          elapsedMs: event.elapsedMs as number,
+                          shots: event.shots as number,
+                          ...(tokens && { tokens }),
+                        }
+                      : c,
+                  ),
+                );
+                setNow(Date.now());
+                break;
+              }
+              case "chunk_error": {
+                const idx = event.index as number;
+                setChunkProgress((prev) =>
+                  prev.map((c) =>
+                    c.index === idx
+                      ? {
+                          ...c,
+                          status: "error" as const,
+                          error: event.error as string,
+                        }
+                      : c,
+                  ),
+                );
+                break;
+              }
+              case "saving":
+                setGeneratingStatus(
+                  t("storyboard.saving", { total: event.total as number }),
+                );
+                break;
+              case "done": {
+                const tokSuffix = totalTokens > 0 ? ` · ${totalTokens} tok` : "";
+                setGeneratingStatus(
+                  t("storyboard.done", {
+                    total: event.totalShots as number,
+                    version: (event.versionLabel as string) ?? startMeta?.versionLabel,
+                  }) + tokSuffix,
+                );
+                break;
+              }
+              case "error":
+                throw new Error((event.message as string) ?? "Unknown error");
+            }
+          }
         }
+      } else {
+        await response.json().catch(() => undefined);
       }
     } catch (err) {
       console.error("Shot split error:", err);
@@ -222,8 +388,34 @@ export default function EpisodeStoryboardPage() {
     }
 
     setGenerating(false);
+    setGeneratingStatus(null);
+    setChunkProgress([]);
     await fetchProject(project.id, useProjectStore.getState().currentEpisodeId!);
     setSelectedVersionId(null); // derived value will auto-select latest
+  }
+
+  async function handleDeleteVersion(versionId: string, label: string) {
+    if (!project) return;
+    if (!confirm(t("storyboard.confirmDeleteVersion", { label }))) return;
+    try {
+      const res = await apiFetch(
+        `/api/projects/${project.id}/storyboard-versions/${versionId}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error ?? t("common.generationFailed"));
+        return;
+      }
+      toast.success(t("storyboard.versionDeleted", { label }));
+      setSelectedVersionId(null);
+      // Drop the now-deleted version from local state to avoid a
+      // stale `selectedVersionId` pointing at a vanished row.
+      await fetchProject(project.id, currentEpisodeId || undefined);
+    } catch (err) {
+      console.error("Delete version error:", err);
+      toast.error(err instanceof Error ? err.message : t("common.generationFailed"));
+    }
   }
 
   async function handleBatchGenerateFrames(overwrite = false) {
@@ -751,20 +943,39 @@ export default function EpisodeStoryboardPage() {
             <div className="flex items-center gap-1">
               {/* Show 2 newest versions */}
               {versions.slice(0, 2).map((v) => (
-                <button
+                <div
                   key={v.id}
-                  onClick={() => {
-                    setSelectedVersionId(v.id);
-                    fetchProject(project!.id, currentEpisodeId || undefined, v.id);
-                  }}
-                  className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                  className={`group flex items-center gap-0.5 rounded-lg transition-colors ${
                     selectedVersionId === v.id
-                      ? "bg-primary/10 text-primary"
-                      : "text-[--text-muted] hover:bg-[--surface] hover:text-[--text-secondary]"
+                      ? "bg-primary/10"
+                      : "hover:bg-[--surface]"
                   }`}
                 >
-                  {v.label}
-                </button>
+                  <button
+                    onClick={() => {
+                      setSelectedVersionId(v.id);
+                      fetchProject(project!.id, currentEpisodeId || undefined, v.id);
+                    }}
+                    className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                      selectedVersionId === v.id
+                        ? "text-primary"
+                        : "text-[--text-muted] group-hover:text-[--text-secondary]"
+                    }`}
+                  >
+                    {v.label}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteVersion(v.id, v.label);
+                    }}
+                    title={t("storyboard.deleteVersion")}
+                    aria-label={t("storyboard.deleteVersion")}
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-[--text-muted] opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
               ))}
               {/* Older versions dropdown */}
               {versions.length > 2 && (
@@ -788,19 +999,35 @@ export default function EpisodeStoryboardPage() {
                       onMouseLeave={() => setVersionDropdownOpen(false)}
                     >
                       {versions.slice(2).map((v) => (
-                        <button
+                        <div
                           key={v.id}
-                          onClick={() => {
-                            setSelectedVersionId(v.id);
-                            fetchProject(project!.id, currentEpisodeId || undefined, v.id);
-                            setVersionDropdownOpen(false);
-                          }}
-                          className={`w-full px-3 py-2 text-left text-[13px] font-medium transition-colors hover:bg-[--surface] ${
+                          className={`group flex items-center justify-between transition-colors hover:bg-[--surface] ${
                             selectedVersionId === v.id ? "text-primary" : "text-[--text-secondary]"
                           }`}
                         >
-                          {v.label}
-                        </button>
+                          <button
+                            onClick={() => {
+                              setSelectedVersionId(v.id);
+                              fetchProject(project!.id, currentEpisodeId || undefined, v.id);
+                              setVersionDropdownOpen(false);
+                            }}
+                            className="flex-1 px-3 py-2 text-left text-[13px] font-medium"
+                          >
+                            {v.label}
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteVersion(v.id, v.label);
+                              setVersionDropdownOpen(false);
+                            }}
+                            title={t("storyboard.deleteVersion")}
+                            aria-label={t("storyboard.deleteVersion")}
+                            className="mr-1 flex h-6 w-6 items-center justify-center rounded-md opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -845,7 +1072,9 @@ export default function EpisodeStoryboardPage() {
               ) : (
                 <Sparkles className="h-3.5 w-3.5" />
               )}
-              {generating ? t("common.generating") : t("project.generateShots")}
+              {generating
+                ? (liveButtonStatus ?? generatingStatus ?? t("common.generating"))
+                : t("project.generateShots")}
             </Button>
           </div>
 

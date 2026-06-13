@@ -11,12 +11,30 @@ export interface ProviderConfig {
   modelId: string;
 }
 
-export function createLanguageModel(config: ProviderConfig): LanguageModel {
+export interface CreateLanguageModelOptions {
+  /**
+   * Extra fields to merge into the outgoing chat-completions body.
+   * The AI SDK's OpenAI provider validates `providerOptions.openai`
+   * against a strict Zod schema and drops anything it doesn't know
+   * (e.g. MiniMax's `thinking` field). To inject non-standard fields
+   * we intercept the underlying `fetch` and merge them in at the
+   * network boundary. Endpoints that don't recognize the field will
+   * just ignore it, so this is safe to use with any OpenAI-compatible
+   * provider.
+   */
+  extraBody?: Record<string, unknown>;
+}
+
+export function createLanguageModel(
+  config: ProviderConfig,
+  options?: CreateLanguageModelOptions,
+): LanguageModel {
   switch (config.protocol) {
     case "openai": {
       const provider = createOpenAI({
         apiKey: config.apiKey,
         baseURL: config.baseUrl,
+        ...(options?.extraBody && { fetch: makeExtraBodyFetch(options.extraBody) }),
       });
       return provider.chat(config.modelId);
     }
@@ -36,6 +54,34 @@ export function createLanguageModel(config: ProviderConfig): LanguageModel {
     default:
       throw new Error(`Unsupported protocol: ${config.protocol}`);
   }
+}
+
+/**
+ * Build a `fetch` wrapper that merges `extraBody` into the JSON body
+ * of every outgoing request. Used to inject provider-specific fields
+ * (e.g. MiniMax's `thinking: {"type":"disabled"}`) that the AI SDK's
+ * OpenAI provider schema would otherwise drop.
+ */
+function makeExtraBodyFetch(extraBody: Record<string, unknown>) {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (init?.body && typeof init.body === "string") {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(init.body);
+      } catch {
+        return fetch(input, init);
+      }
+      parsed = { ...parsed, ...extraBody };
+      // One-time debug log so we can verify the injected field actually
+      // reaches MiniMax. Cheap to keep on; remove after we confirm
+      // `thinking: disabled` lands in the request body.
+      console.log(
+        `[ai-sdk] injecting extraBody into ${typeof input === "string" ? input : "<URL>"}: ${JSON.stringify(extraBody)}`,
+      );
+      return fetch(input, { ...init, body: JSON.stringify(parsed) });
+    }
+    return fetch(input, init);
+  };
 }
 
 /**

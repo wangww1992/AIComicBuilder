@@ -2,6 +2,7 @@ import type { AIProvider, TextOptions, ImageOptions } from "../types";
 import fs from "node:fs";
 import path from "node:path";
 import { id as genId } from "@/lib/id";
+import { compressPrompt } from "./prompt-compress";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -149,71 +150,14 @@ export class MiniMaxImageProvider implements AIProvider {
   }
 
   /**
-   * Compress a prompt that exceeds MiniMax's per-request limit.
-   *
-   * Strategy:
-   *   1. If the prompt already fits, return as-is (zero cost).
-   *   2. If a text LLM is wired in, ask it to rewrite the prompt in the
-   *      same language, preserving visual details. This is the smart path.
-   *   3. If the LLM is unavailable or its rewrite still overflows, fall
-   *      back to a hard slice with an ellipsis so the request still goes
-   *      through. Worst case the image loses some fidelity, but we never
-   *      crash with a 2013 error.
-   *
-   * Exported via the class so callers / tests can drive it directly.
+   * Thin wrapper around the standalone `compressPrompt` helper so the
+   * class can use `this.textProvider` without callers having to thread
+   * it through.
    */
   async compressPromptIfNeeded(prompt: string): Promise<string> {
-    if (prompt.length <= MAX_PROMPT_LENGTH) return prompt;
-
-    const overBy = prompt.length - MAX_PROMPT_LENGTH;
-    console.warn(
-      `[MiniMaxImage] Prompt is ${prompt.length} chars (over by ${overBy}); compressing...`
-    );
-
-    if (this.textProvider) {
-      try {
-        const compressed = await this.textProvider.generateText(
-          COMPRESS_INSTRUCTION.replace(
-            "{MAX}",
-            String(MAX_PROMPT_LENGTH),
-          ) + "\n\n---\n\n" + prompt,
-          { temperature: 0.3 },
-        );
-        if (compressed.length <= MAX_PROMPT_LENGTH) {
-          console.log(
-            `[MiniMaxImage] Compressed prompt: ${prompt.length} → ${compressed.length} chars`,
-          );
-          return compressed;
-        }
-        console.warn(
-          `[MiniMaxImage] Compressed prompt still ${compressed.length} chars; truncating to ${MAX_PROMPT_LENGTH}.`,
-        );
-        return compressed.slice(0, MAX_PROMPT_LENGTH - 3) + "...";
-      } catch (err) {
-        console.warn(
-          `[MiniMaxImage] LLM compression failed (${err instanceof Error ? err.message : err}); falling back to hard slice.`,
-        );
-      }
-    } else {
-      console.warn(
-        "[MiniMaxImage] No text LLM configured for compression; falling back to hard slice.",
-      );
-    }
-
-    return prompt.slice(0, MAX_PROMPT_LENGTH - 3) + "...";
+    return compressPrompt(prompt, MAX_PROMPT_LENGTH, this.textProvider);
   }
 }
 
-const COMPRESS_INSTRUCTION = `You are compressing an image-generation prompt. The output MUST be at most {MAX} characters (the image model's hard limit) and MUST stay in the SAME LANGUAGE as the input.
-
-Preserve, in roughly this priority order:
-1. Subject identity and action (who/what, doing what)
-2. Visual style and art direction (e.g. "cinematic", "anime", "photorealistic")
-3. Composition, framing, camera angle, lens
-4. Lighting, color palette, mood
-5. Costume, props, background detail
-6. Any negative cues ("no text", "no watermark")
-
-Drop: filler words, redundant adjectives, meta-instructions ("this is for..."), and any sentence that doesn't change the picture.
-
-Output ONLY the compressed prompt — no explanation, no quotes, no preamble.`;
+// (Compression helper lives in ./prompt-compress.ts so it can be unit-tested
+// without pulling in the provider's `@/`-aliased dependencies.)
