@@ -6,6 +6,7 @@ import { KlingImageProvider } from "./providers/kling-image";
 import { KlingVideoProvider } from "./providers/kling-video";
 import { WanVideoProvider } from "./providers/wan-video";
 import { UCloudSeedanceProvider } from "./providers/ucloud-seedance";
+import { ArkImageProvider } from "./providers/ark-image";
 import { DashScopeImageProvider } from "./providers/dashscope-image";
 import { MiniMaxImageProvider } from "./providers/minimax-image";
 import { MiniMaxVideoProvider } from "./providers/minimax-video";
@@ -61,6 +62,13 @@ export function createAIProvider(
       });
     case "dashscope":
       return new DashScopeImageProvider({
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl,
+        model: config.modelId,
+        ...(uploadDir && { uploadDir }),
+      });
+    case "ark":
+      return new ArkImageProvider({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl,
         model: config.modelId,

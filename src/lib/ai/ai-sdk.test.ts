@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { extractJSON, stripThinking } from "./ai-sdk.ts";
 import { compressPrompt } from "./providers/prompt-compress.ts";
 import { fetchAnthropicModels } from "./providers/anthropic-models.ts";
+import { parseArkImageResponse, buildArkImageBody } from "./providers/ark-models.ts";
 import type { AIProvider } from "./types.ts";
 
 const char = (name: string) =>
@@ -294,4 +295,76 @@ test("fetchAnthropicModels: honors custom baseUrl", async () => {
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+// ── parseArkImageResponse: ARK /v1/images/generations response ───────
+
+test("parseArkImageResponse: happy path — b64_json in data[0]", () => {
+  const json = {
+    model: "doubao-seedream-5.0-lite",
+    created: 1700000000,
+    data: [{ b64_json: "aGVsbG8=", size: "1024x1024" }],
+    usage: { generated_images: 1, total_tokens: 4096 },
+  };
+  const out = parseArkImageResponse(json);
+  assert.equal(out.kind, "ok");
+  if (out.kind === "ok") {
+    assert.equal(out.b64, "aGVsbG8=");
+    assert.equal(out.size, "1024x1024");
+  }
+});
+
+test("parseArkImageResponse: top-level error → kind='error'", () => {
+  const json = {
+    error: { code: "InvalidParameter", message: "prompt too long" },
+  };
+  const out = parseArkImageResponse(json);
+  assert.equal(out.kind, "error");
+  if (out.kind === "error") {
+    assert.match(out.message, /prompt too long/);
+    assert.equal(out.code, "InvalidParameter");
+  }
+});
+
+test("parseArkImageResponse: missing b64_json → kind='error'", () => {
+  const json = { model: "x", data: [{}] };
+  const out = parseArkImageResponse(json);
+  assert.equal(out.kind, "error");
+  if (out.kind === "error") {
+    assert.match(out.message, /b64_json/);
+  }
+});
+
+test("parseArkImageResponse: empty data array → kind='error'", () => {
+  const json = { model: "x", data: [] };
+  const out = parseArkImageResponse(json);
+  assert.equal(out.kind, "error");
+});
+
+test("buildArkImageBody: minimal (prompt only) sets defaults", () => {
+  const body = buildArkImageBody({ prompt: "a cat" });
+  assert.equal(body.model, "doubao-seedream-5.0-lite");
+  assert.equal(body.prompt, "a cat");
+  assert.equal(body.response_format, "b64_json");
+  assert.equal(body.watermark, false);
+  assert.equal(body.image, undefined);
+  assert.equal(body.size, undefined);
+});
+
+test("buildArkImageBody: with reference images → 'image' field set", () => {
+  const body = buildArkImageBody({
+    prompt: "transform this",
+    referenceImages: ["data:image/png;base64,abc", "data:image/png;base64,def"],
+  });
+  assert.deepEqual(body.image, ["data:image/png;base64,abc", "data:image/png;base64,def"]);
+});
+
+test("buildArkImageBody: with size option → 'size' field set", () => {
+  const body = buildArkImageBody({ prompt: "x", size: "2048x2048" });
+  assert.equal(body.size, "2048x2048");
+});
+
+test("buildArkImageBody: with explicit model → that model wins", () => {
+  const body = buildArkImageBody({ prompt: "x", model: "doubao-seedream-4.5" });
+  assert.equal(body.model, "doubao-seedream-4.5");
 });
