@@ -1216,6 +1216,7 @@ async function handleShotSplitStream(
           system: systemPrompt,
           prompt,
           providerOptions: jsonMode,
+          maxOutputTokens: 8192,
         });
         const parsed = JSON.parse(extractJSON(result.text));
         // Handle multiple formats:
