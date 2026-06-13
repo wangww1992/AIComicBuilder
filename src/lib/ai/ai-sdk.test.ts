@@ -15,6 +15,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extractJSON, stripThinking } from "./ai-sdk.ts";
+import { compressPrompt } from "./providers/prompt-compress.ts";
+import { fetchAnthropicModels } from "./providers/anthropic-models.ts";
+import type { AIProvider } from "./types.ts";
 
 const char = (name: string) =>
   JSON.stringify({ name, frequency: 1, description: "x", visualHint: "x" });
@@ -150,4 +153,145 @@ test("stripThinking: collapses extra blank lines left behind", () => {
   // verify the helper leaves predictable whitespace.
   const text = "<think>thought</think>\n\n\nReal text.";
   assert.equal(stripThinking(text), "\n\n\nReal text.");
+});
+
+// ── compressPrompt: MiniMax's 1500-char prompt cap ───────────────────────
+// Bug report: MiniMax image-01 returns 2013 "prompt length must be less
+// than 1500" when the upstream keyframe-prompt generator over-fluffs its
+// output. The provider falls back to a hard slice without a text LLM
+// (the cheaper path) and to an LLM rewrite when one is wired in.
+
+const longPrompt = "A".repeat(2000);
+
+test("compressPrompt: short prompt is returned as-is (zero cost)", async () => {
+  const short = "A short keyframe prompt.";
+  const calls: string[] = [];
+  const fakeText: AIProvider = {
+    generateText: async (p) => {
+      calls.push(p);
+      return p;
+    },
+    generateImage: async () => "",
+  };
+  const out = await compressPrompt(short, 1500, fakeText);
+  assert.equal(out, short);
+  assert.equal(calls.length, 0, "text LLM must not be called for short prompts");
+});
+
+test("compressPrompt: long prompt + no text LLM → hard slice with ellipsis", async () => {
+  const out = await compressPrompt(longPrompt, 1500, undefined);
+  assert.ok(out.length <= 1500, `length=${out.length}`);
+  assert.ok(out.endsWith("..."), "truncation marker should be present");
+  assert.equal(out.length, 1500);
+});
+
+test("compressPrompt: long prompt + text LLM → returns LLM's rewrite", async () => {
+  const compressed = "A shorter, smarter prompt.";
+  const fakeText: AIProvider = {
+    generateText: async (p) => {
+      // The instruction template should mention the limit and the
+      // original prompt should be appended after a separator.
+      assert.match(p, /1500/, "instruction should mention the 1500 char limit");
+      assert.ok(p.includes(longPrompt), "original prompt should be appended");
+      return compressed;
+    },
+    generateImage: async () => "",
+  };
+  const out = await compressPrompt(longPrompt, 1500, fakeText);
+  assert.equal(out, compressed);
+});
+
+test("compressPrompt: text LLM still overflows → truncates LLM output", async () => {
+  // The LLM tries its best but the rewrite is still over the limit.
+  const stillTooLong = "B".repeat(2000);
+  const fakeText: AIProvider = {
+    generateText: async () => stillTooLong,
+    generateImage: async () => "",
+  };
+  const out = await compressPrompt(longPrompt, 1500, fakeText);
+  assert.ok(out.length <= 1500, `length=${out.length}`);
+  assert.ok(out.endsWith("..."));
+});
+
+test("compressPrompt: text LLM throws → falls back to hard slice", async () => {
+  const fakeText: AIProvider = {
+    generateText: async () => {
+      throw new Error("API down");
+    },
+    generateImage: async () => "",
+  };
+  const out = await compressPrompt(longPrompt, 1500, fakeText);
+  assert.ok(out.length <= 1500, `length=${out.length}`);
+  assert.ok(out.endsWith("..."));
+  // Should be the ORIGINAL prompt sliced, not a regenerated one.
+  assert.ok(out.startsWith("A".repeat(100)));
+});
+
+// ── fetchAnthropicModels: GET /v1/models response parsing ────────────
+
+test("fetchAnthropicModels: parses data[].id from Anthropic response", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    // Verify the request shape: x-api-key + anthropic-version headers
+    const req = init as RequestInit;
+    const headers = req.headers as Record<string, string>;
+    assert.equal(headers["x-api-key"], "sk-test-123");
+    assert.equal(headers["anthropic-version"], "2023-06-01");
+    assert.equal(typeof input, "string");
+    assert.match(input as string, /\/v1\/models$/);
+    return new Response(
+      JSON.stringify({
+        data: [
+          { id: "claude-haiku-4-5", type: "model", display_name: "Claude Haiku 4.5" },
+          { id: "claude-sonnet-4-5", type: "model", display_name: "Claude Sonnet 4.5" },
+          { id: "claude-opus-4-7", type: "model", display_name: "Claude Opus 4.7" },
+        ],
+        has_more: false,
+        first_id: "claude-haiku-4-5",
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  try {
+    const models = await fetchAnthropicModels("https://api.anthropic.com", "sk-test-123");
+    assert.equal(models.length, 3);
+    assert.equal(models[0].id, "claude-haiku-4-5");
+    assert.equal(models[0].name, "claude-haiku-4-5");
+    assert.equal(models[1].id, "claude-sonnet-4-5");
+    assert.equal(models[2].id, "claude-opus-4-7");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("fetchAnthropicModels: throws on non-2xx response", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response("Unauthorized", { status: 401, statusText: "Unauthorized" });
+  try {
+    await assert.rejects(
+      () => fetchAnthropicModels("https://api.anthropic.com", "bad-key"),
+      /401/,
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("fetchAnthropicModels: honors custom baseUrl", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(input, "https://proxy.example.com/v1/models");
+    return new Response(JSON.stringify({ data: [{ id: "claude-haiku-4-5" }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    const models = await fetchAnthropicModels("https://proxy.example.com", "key");
+    assert.equal(models.length, 1);
+    assert.equal(models[0].id, "claude-haiku-4-5");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
