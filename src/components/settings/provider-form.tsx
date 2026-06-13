@@ -22,7 +22,7 @@ const DEFAULT_BASE_URLS: Record<Protocol, string> = {
   wan: "https://dashscope.aliyuncs.com/api/v1",
   dashscope: "https://dashscope.aliyuncs.com/api/v1",
   minimax: "https://api.minimaxi.com",
-  anthropic: "",
+  anthropic: "https://api.anthropic.com",
 };
 
 function getProtocolOptions(capability: Capability): { value: Protocol; label: string }[] {
@@ -30,6 +30,7 @@ function getProtocolOptions(capability: Capability): { value: Protocol; label: s
     return [
       { value: "openai", label: "OpenAI" },
       { value: "gemini", label: "Gemini" },
+      { value: "anthropic", label: "Anthropic" },
     ];
   }
   if (capability === "image") {
