@@ -129,8 +129,12 @@ export async function POST(request: Request) {
         models: [
           // Image
           { id: "image-01", name: "MiniMax image-01" },
-          // Video (text-to-video / image-to-video / first-last-frame)
-          { id: "MiniMax-Hailuo-2.3", name: "Hailuo 2.3 (T2V / I2V / Keyframe)" },
+          // Video (text-to-video / image-to-video / first-last-frame).
+          // Keyframe (first+last frame) is `MiniMax-Hailuo-02` only per
+          // the MiniMax docs; the labels here reflect that users may
+          // also try other models for I2V.
+          { id: "MiniMax-Hailuo-2.3", name: "Hailuo 2.3 (T2V / I2V)" },
+          { id: "MiniMax-Hailuo-2.3-Fast", name: "Hailuo 2.3 Fast (T2V / I2V)" },
           { id: "MiniMax-Hailuo-02", name: "Hailuo 02 (T2V / I2V / Keyframe)" },
           // Video (subject-reference, face consistency)
           { id: "S2V-01", name: "Subject Reference v1" },

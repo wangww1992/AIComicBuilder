@@ -23,6 +23,11 @@ const DEFAULT_BASE_URLS: Record<Protocol, string> = {
   dashscope: "https://dashscope.aliyuncs.com/api/v1",
   minimax: "https://api.minimaxi.com",
   anthropic: "https://api.anthropic.com",
+  // ARK image provider appends `/images/generations` to baseUrl (same
+  // convention as DashScope, where baseUrl carries the `/api/plan/v3`
+  // API path prefix). The default below is the value ARK's settings
+  // need to be at to produce the working endpoint
+  // `…/api/plan/v3/images/generations`.
   ark: "https://ark.cn-beijing.volces.com/api/plan/v3",
 };
 

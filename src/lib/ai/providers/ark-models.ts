@@ -35,6 +35,60 @@ export interface ArkImageBody {
 
 export const ARK_DEFAULT_MODEL = "doubao-seedream-5.0-lite";
 
+/**
+ * Build the full URL for an ARK image-generation request. `baseUrl`
+ * is expected to be the ARK host with the `/api/plan/v3` API path
+ * prefix (e.g. `https://ark.cn-beijing.volces.com/api/plan/v3`); this
+ * helper appends `/images/generations` to produce the final endpoint.
+ *
+ * This convention matches DashScope (`baseUrl` = `…/api/v1`, provider
+ * appends the resource path) and is the form the Volcano Engine
+ * settings UI defaults to. Do NOT paste the full endpoint URL from
+ * the ARK docs into `baseUrl` — that one already ends in
+ * `/images/generations` and would be doubled.
+ *
+ * Pinned by a unit test — do not change the suffix without updating
+ * the test.
+ */
+export function buildArkImageUrl(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/images/generations`;
+}
+
+/**
+ * `true` for http(s) URLs (case-insensitive scheme). Anything else —
+ * local paths, data URIs, empty strings — is treated as a filesystem
+ * input by the provider's reference-image conversion. The check is
+ * case-insensitive on the scheme so `HTTPS://…` is also recognized.
+ */
+export function isHttpUrl(input: string): boolean {
+  return /^https?:\/\//i.test(input);
+}
+
+/**
+ * Map a file path's extension to a lowercase mime type for use in a
+ * `data:<mime>;base64,…` URI. ARK's docs require the mime subtype to
+ * be lowercase (e.g. `data:image/png;base64,…`, NOT `data:image/PNG`).
+ * Unknown extensions fall back to `image/jpeg` since the ARK provider
+ * saves generated images as `.jpeg` and seedream defaults to jpeg
+ * output.
+ */
+export function mimeFromPath(filePath: string): string {
+  const ext = filePath.toLowerCase().split(".").pop() || "";
+  switch (ext) {
+    case "png": return "image/png";
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "webp": return "image/webp";
+    case "gif": return "image/gif";
+    case "bmp": return "image/bmp";
+    case "tif":
+    case "tiff": return "image/tiff";
+    case "heic":
+    case "heif": return "image/heic";
+    default: return "image/jpeg";
+  }
+}
+
 export function buildArkImageBody(input: ArkImageBodyInput): ArkImageBody {
   const body: ArkImageBody = {
     model: input.model ?? ARK_DEFAULT_MODEL,

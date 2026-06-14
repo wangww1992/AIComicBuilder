@@ -17,7 +17,19 @@ import assert from "node:assert/strict";
 import { extractJSON, stripThinking } from "./ai-sdk.ts";
 import { compressPrompt } from "./providers/prompt-compress.ts";
 import { fetchAnthropicModels } from "./providers/anthropic-models.ts";
-import { parseArkImageResponse, buildArkImageBody } from "./providers/ark-models.ts";
+import {
+  parseArkImageResponse,
+  buildArkImageBody,
+  buildArkImageUrl,
+  isHttpUrl,
+  mimeFromPath,
+} from "./providers/ark-models.ts";
+import {
+  allowedResolutionsFor,
+  defaultResolutionFor,
+  isKeyframeSupported,
+  validateMiniMaxVideoRequest,
+} from "./providers/minimax-video-models.ts";
 import type { AIProvider } from "./types.ts";
 
 const char = (name: string) =>
@@ -367,4 +379,182 @@ test("buildArkImageBody: with size option → 'size' field set", () => {
 test("buildArkImageBody: with explicit model → that model wins", () => {
   const body = buildArkImageBody({ prompt: "x", model: "doubao-seedream-4.5" });
   assert.equal(body.model, "doubao-seedream-4.5");
+});
+
+// ── buildArkImageUrl: ARK image endpoint construction ──────────────────
+// Convention: `baseUrl` carries the `/api/plan/v3` API path prefix
+// (same pattern as DashScope's `/api/v1`), and the helper appends
+// `/images/generations` to produce the final endpoint. A user who
+// pastes the full endpoint URL from the ARK docs into the baseUrl
+// field will get the suffix doubled — these tests pin the correct
+// construction and the "no double slash on trailing /" case.
+
+test("buildArkImageUrl: baseUrl with /api/plan/v3 → /api/plan/v3/images/generations", () => {
+  assert.equal(
+    buildArkImageUrl("https://ark.cn-beijing.volces.com/api/plan/v3"),
+    "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+  );
+});
+
+test("buildArkImageUrl: trailing slash on baseUrl is stripped (no double slash)", () => {
+  assert.equal(
+    buildArkImageUrl("https://ark.cn-beijing.volces.com/api/plan/v3/"),
+    "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations",
+  );
+});
+
+test("buildArkImageUrl: result contains the /images/generations suffix exactly once", () => {
+  // Guards against the doubled-path bug class regardless of which
+  // baseUrl the user supplied.
+  const url = buildArkImageUrl("https://ark.cn-beijing.volces.com/api/plan/v3");
+  const occurrences = (url.match(/\/images\/generations/g) || []).length;
+  assert.equal(occurrences, 1, `suffix appeared ${occurrences} times in ${url}`);
+});
+
+// ── isHttpUrl / mimeFromPath: pure predicates for reference-image
+//    conversion in ArkImageProvider. The fs-touching wrapper
+//    (`toDataUrlOrUrl` in `ark-image.ts`) delegates to these; the
+//    wrapper itself is verified by a manual smoke test because the
+//    test runner can't import `ark-image.ts` (it has runtime
+//    cross-file imports the strip-types loader can't resolve).
+
+test("isHttpUrl: http and https URLs are recognized", () => {
+  assert.equal(isHttpUrl("http://example.com/a.png"), true);
+  assert.equal(isHttpUrl("https://cdn.example.com/a.png"), true);
+  assert.equal(isHttpUrl("HTTPS://CDN.EXAMPLE.COM/A.PNG"), true);
+});
+
+test("isHttpUrl: local file paths and data URIs are NOT treated as http URLs", () => {
+  assert.equal(isHttpUrl("/var/uploads/images/abc.png"), false);
+  assert.equal(isHttpUrl("./relative/path.jpeg"), false);
+  assert.equal(isHttpUrl("uploads/x.webp"), false);
+  assert.equal(isHttpUrl("data:image/png;base64,abc"), false);
+  assert.equal(isHttpUrl(""), false);
+});
+
+test("mimeFromPath: common image extensions map to lowercase mime types", () => {
+  // ARK docs require the mime subtype to be lowercase. Pinned here.
+  assert.equal(mimeFromPath("/uploads/ref.png"), "image/png");
+  assert.equal(mimeFromPath("/uploads/ref.PNG"), "image/png");
+  assert.equal(mimeFromPath("/uploads/ref.jpg"), "image/jpeg");
+  assert.equal(mimeFromPath("/uploads/ref.jpeg"), "image/jpeg");
+  assert.equal(mimeFromPath("/uploads/ref.webp"), "image/webp");
+  assert.equal(mimeFromPath("/uploads/ref.gif"), "image/gif");
+});
+
+test("mimeFromPath: unknown extension falls back to image/jpeg (the format the ARK provider writes)", () => {
+  // The provider saves generated images as `<id>.jpeg` and ARK's seedream
+  // models return jpeg by default, so the safe fallback is image/jpeg.
+  assert.equal(mimeFromPath("/uploads/ref"), "image/jpeg");
+  assert.equal(mimeFromPath("/uploads/ref.unknown"), "image/jpeg");
+});
+
+// ── MiniMax video validation: per-docs rules pinned by these tests ────
+// Reference: the two endpoints the user pasted
+//   - POST /v1/video_generation (image-to-video)
+//   - POST /v1/video_generation (start-end-to-video)
+// Key constraints:
+//   - Keyframe (start-end) mode is `MiniMax-Hailuo-02` ONLY.
+//   - 1080P requires duration=6s; 10s is 768P-only.
+//   - 512P is I2V-only (Hailuo-02 I2V) — never keyframe.
+//   - I2V-01 family supports 720P / 6s only.
+
+test("isKeyframeSupported: only MiniMax-Hailuo-02", () => {
+  assert.equal(isKeyframeSupported("MiniMax-Hailuo-02"), true);
+  assert.equal(isKeyframeSupported("MiniMax-Hailuo-2.3"), false);
+  assert.equal(isKeyframeSupported("MiniMax-Hailuo-2.3-Fast"), false);
+  assert.equal(isKeyframeSupported("I2V-01-Director"), false);
+  assert.equal(isKeyframeSupported("S2V-01"), false);
+});
+
+test("validateMiniMaxVideoRequest: keyframe mode requires MiniMax-Hailuo-02", () => {
+  const err = validateMiniMaxVideoRequest({
+    model: "MiniMax-Hailuo-2.3",
+    mode: "keyframe",
+    duration: 6,
+    resolution: "768P",
+  });
+  assert.ok(err && /does not support the start-end/i.test(err), `got: ${err}`);
+  assert.ok(err && /MiniMax-Hailuo-02/.test(err), "error should name the supported model");
+});
+
+test("validateMiniMaxVideoRequest: Hailuo-02 keyframe is valid", () => {
+  assert.equal(
+    validateMiniMaxVideoRequest({
+      model: "MiniMax-Hailuo-02",
+      mode: "keyframe",
+      duration: 6,
+      resolution: "768P",
+    }),
+    null,
+  );
+});
+
+test("validateMiniMaxVideoRequest: subject_ref requires S2V-01", () => {
+  const err = validateMiniMaxVideoRequest({
+    model: "MiniMax-Hailuo-2.3",
+    mode: "subject_ref",
+    duration: 6,
+    resolution: "768P",
+  });
+  assert.ok(err && /S2V-01/.test(err), `got: ${err}`);
+});
+
+test("validateMiniMaxVideoRequest: Hailuo family 1080P needs duration=6", () => {
+  // 10s + 1080P is a forbidden combo per docs.
+  const err = validateMiniMaxVideoRequest({
+    model: "MiniMax-Hailuo-2.3",
+    mode: "i2v",
+    duration: 10,
+    resolution: "1080P",
+  });
+  assert.ok(err && /1080P/.test(err), `got: ${err}`);
+});
+
+test("validateMiniMaxVideoRequest: I2V-01 family rejects 768P / 1080P", () => {
+  // Old I2V-01 family only supports 720P. Catching this client-side
+  // gives a clearer error than the API's generic 1026.
+  for (const r of ["768P", "1080P"]) {
+    const err = validateMiniMaxVideoRequest({
+      model: "I2V-01-Director",
+      mode: "i2v",
+      duration: 6,
+      resolution: r,
+    });
+    assert.ok(err && new RegExp(r).test(err), `${r} on I2V-01 should fail, got: ${err}`);
+  }
+});
+
+test("allowedResolutionsFor: Hailuo-02 6s I2V includes 512P; keyframe does not", () => {
+  // 512P is I2V-only per docs. The keyframe endpoint explicitly says
+  // 512P is not supported there.
+  const i2v = allowedResolutionsFor("MiniMax-Hailuo-02", 6, { keyframeMode: false });
+  assert.ok(i2v.includes("512P"));
+  const kf = allowedResolutionsFor("MiniMax-Hailuo-02", 6, { keyframeMode: true });
+  assert.ok(!kf.includes("512P"), "keyframe must not include 512P");
+});
+
+test("allowedResolutionsFor: 10s is 768P-only across the Hailuo family", () => {
+  for (const m of ["MiniMax-Hailuo-2.3", "MiniMax-Hailuo-2.3-Fast", "MiniMax-Hailuo-02"]) {
+    const r = allowedResolutionsFor(m, 10);
+    assert.deepEqual([...r], ["768P"], `${m} @ 10s should be 768P-only`);
+  }
+});
+
+test("allowedResolutionsFor: I2V-01 family is 720P / 6s only", () => {
+  for (const m of ["I2V-01-Director", "I2V-01-live", "I2V-01"]) {
+    const r6 = allowedResolutionsFor(m, 6);
+    assert.deepEqual([...r6], ["720P"]);
+    const r10 = allowedResolutionsFor(m, 10);
+    assert.deepEqual([...r10], [], `${m} does not support 10s`);
+  }
+});
+
+test("defaultResolutionFor: docs-default 768P for Hailuo, 720P for I2V-01", () => {
+  // Replaces the previously hardcoded "1080P" in minimax-video.ts.
+  assert.equal(defaultResolutionFor("MiniMax-Hailuo-2.3", 6), "768P");
+  assert.equal(defaultResolutionFor("MiniMax-Hailuo-2.3", 10), "768P");
+  assert.equal(defaultResolutionFor("MiniMax-Hailuo-02", 6), "768P");
+  assert.equal(defaultResolutionFor("MiniMax-Hailuo-02", 10), "768P");
+  assert.equal(defaultResolutionFor("I2V-01-Director", 6), "720P");
 });

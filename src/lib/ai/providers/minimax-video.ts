@@ -1,10 +1,19 @@
 import type { VideoProvider, VideoGenerateParams, VideoGenerateResult } from "../types";
+import {
+  defaultResolutionFor,
+  validateMiniMaxVideoRequest,
+  type MiniMaxVideoMode,
+} from "./minimax-video-models";
 import fs from "node:fs";
 import path from "node:path";
 import { id as genId } from "@/lib/id";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+// ARK and the in-house image provider both default the data URI mime
+// to `image/jpeg`. We mirror that here so a generated first/last frame
+// — saved as `.jpeg` by the image provider — round-trips with the
+// right mime subtype and ARK's "mime subtype must be lowercase" rule.
 function toDataUrl(filePathOrUrl: string): string {
   if (filePathOrUrl.startsWith("http://") || filePathOrUrl.startsWith("https://")) {
     return filePathOrUrl;
@@ -17,7 +26,7 @@ function toDataUrl(filePathOrUrl: string): string {
         ? "image/png"
         : ext === "webp"
           ? "image/webp"
-          : "image/png";
+          : "image/jpeg";
   const base64 = fs.readFileSync(filePathOrUrl, { encoding: "base64" });
   return `data:${mime};base64,${base64}`;
 }
@@ -121,32 +130,92 @@ export class MiniMaxVideoProvider implements VideoProvider {
 
   /**
    * Build the request body, dispatching to one of the four modes:
-   *   - t2v            : prompt only                       (Hailuo-2.3 / 02)
-   *   - i2v            : first_frame_image + prompt        (Hailuo-2.3 / 02)
-   *   - start_end      : first_frame + last_frame + prompt (Hailuo-2.3 / 02)
-   *   - subject_ref    : subject_reference[].image + prompt (S2V-01 only)
+   *   - t2v            : prompt only                          (Hailuo family)
+   *   - i2v            : first_frame_image + prompt           (Hailuo / I2V-01)
+   *   - keyframe       : first_frame + last_frame + prompt    (Hailuo-02 ONLY)
+   *   - subject_ref    : subject_reference[].image + prompt   (S2V-01 only)
    *
    * The `S2V-01` model is the only one that understands
    * `subject_reference`; other models reject it. So we only emit that
    * field when the configured model explicitly opts in.
+   *
+   * Per docs, keyframe mode is supported by `MiniMax-Hailuo-02` ONLY —
+   * sending it with `MiniMax-Hailuo-2.3` or any other model produces
+   * an API error (1026/2013). We catch that case up front with a
+   * user-visible error.
+   *
+   * Resolution default is `768P` (Hailuo) or `720P` (I2V-01 family)
+   * per docs; the previous hardcoded `1080P` would have failed for
+   * `Hailuo-02` keyframe + 10s (only `768P` is allowed there).
    */
   private buildBody(params: VideoGenerateParams): Record<string, unknown> {
+    const duration = params.duration || 6;
+    const mode: MiniMaxVideoMode = this.detectMode(params);
+    const resolution = defaultResolutionFor(this.model, duration);
+
+    // Validate up front so a user with the wrong model configured for
+    // keyframe mode gets a clear message instead of a cryptic 1026.
+    const validationError = validateMiniMaxVideoRequest({
+      model: this.model,
+      mode,
+      duration,
+      resolution,
+    });
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
     const base: Record<string, unknown> = {
       model: this.model,
       prompt: params.prompt,
-      duration: params.duration || 6,
-      resolution: "1080P",
+      duration,
+      resolution,
     };
 
-    // Mode 3: first + last frame (keyframe).
-    if ("firstFrame" in params && params.firstFrame && params.lastFrame) {
-      base.first_frame_image = toDataUrl(params.firstFrame);
-      base.last_frame_image = toDataUrl(params.lastFrame);
+    // Mode 3: first + last frame (keyframe). Only MiniMax-Hailuo-02.
+    if (mode === "keyframe") {
+      const { firstFrame, lastFrame } = params as { firstFrame: string; lastFrame: string };
+      base.first_frame_image = toDataUrl(firstFrame);
+      base.last_frame_image = toDataUrl(lastFrame);
       return base;
     }
 
     // Mode 4: subject reference (S2V-01 only). Use the initial image as
     // the first ref and any extras as additional refs.
+    if (mode === "subject_ref") {
+      const { initialImage, referenceImages = [] } = params as {
+        initialImage: string;
+        referenceImages?: string[];
+      };
+      base.subject_reference = [
+        {
+          type: "character",
+          image: [toDataUrl(initialImage), ...referenceImages.map(toDataUrl)],
+        },
+      ];
+      return base;
+    }
+
+    // Mode 2: image-to-video (initial frame only).
+    if (mode === "i2v") {
+      const { initialImage } = params as { initialImage: string };
+      base.first_frame_image = toDataUrl(initialImage);
+      return base;
+    }
+
+    // Mode 1: text-to-video (no images).
+    return base;
+  }
+
+  /**
+   * Pick the request mode from the params. The order matters:
+   * keyframe (firstFrame+lastFrame) takes precedence over i2v
+   * (initialImage), and subject_ref only applies to S2V-01.
+   */
+  private detectMode(params: VideoGenerateParams): MiniMaxVideoMode {
+    if ("firstFrame" in params && params.firstFrame && params.lastFrame) {
+      return "keyframe";
+    }
     if (
       this.model === "S2V-01" &&
       "initialImage" in params &&
@@ -154,23 +223,12 @@ export class MiniMaxVideoProvider implements VideoProvider {
       params.referenceImages &&
       params.referenceImages.length > 0
     ) {
-      base.subject_reference = [
-        {
-          type: "character",
-          image: [toDataUrl(params.initialImage), ...params.referenceImages.map(toDataUrl)],
-        },
-      ];
-      return base;
+      return "subject_ref";
     }
-
-    // Mode 2: image-to-video (initial frame only).
     if ("initialImage" in params && params.initialImage) {
-      base.first_frame_image = toDataUrl(params.initialImage);
-      return base;
+      return "i2v";
     }
-
-    // Mode 1: text-to-video (no images).
-    return base;
+    return "t2v";
   }
 
   private async pollForFile(taskId: string): Promise<string> {
