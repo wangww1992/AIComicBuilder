@@ -1326,7 +1326,7 @@ export function ShotCard({
                         {t("common.upload")}
                       </button>
                       {generationMode === "keyframe" && (() => {
-                        const target = asset.type as FrameTarget;
+                        const target: FrameTarget = isStart ? "first_frame" : "last_frame";
                         const isGeneratingTarget = generatingFrameTargets.includes(target);
                         return (
                           <button
