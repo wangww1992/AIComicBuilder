@@ -28,6 +28,7 @@ import {
   allowedResolutionsFor,
   defaultResolutionFor,
   isKeyframeSupported,
+  normalizeMiniMaxDuration,
   validateMiniMaxVideoRequest,
 } from "./providers/minimax-video-models.ts";
 import type { AIProvider } from "./types.ts";
@@ -559,21 +560,15 @@ test("defaultResolutionFor: docs-default 768P for Hailuo, 720P for I2V-01", () =
   assert.equal(defaultResolutionFor("I2V-01-Director", 6), "720P");
 });
 
-test("defaultResolutionFor: Hailuo family falls back to allowed resolution when 768P unsupported", () => {
-  // 8s is not in the official docs, but the app defaults shots to 8s and
-  // expects 720P to be used as a fallback instead of erroring out.
-  assert.equal(defaultResolutionFor("MiniMax-Hailuo-02", 8), "720P");
-  assert.equal(defaultResolutionFor("MiniMax-Hailuo-2.3", 8), "720P");
-});
-
-test("validateMiniMaxVideoRequest: Hailuo family accepts 720P at 8s fallback duration", () => {
-  assert.equal(
-    validateMiniMaxVideoRequest({
-      model: "MiniMax-Hailuo-02",
-      mode: "keyframe",
-      duration: 8,
-      resolution: "720P",
-    }),
-    null,
-  );
+test("normalizeMiniMaxDuration: snaps unsupported durations to 6s or 10s", () => {
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 5), 6);
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 6), 6);
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 7), 6);
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 8), 10);
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 9), 10);
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 10), 10);
+  assert.equal(normalizeMiniMaxDuration("MiniMax-Hailuo-02", 12), 10);
+  // I2V-01 family is 6s-only.
+  assert.equal(normalizeMiniMaxDuration("I2V-01-Director", 8), 6);
+  assert.equal(normalizeMiniMaxDuration("I2V-01", 10), 6);
 });

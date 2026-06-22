@@ -90,15 +90,10 @@ export function validateMiniMaxVideoRequest(input: {
 
 // ── Resolution tables ────────────────────────────────────────────────
 
-/** Hailuo family (2.3 / 2.3-Fast / 02) — full table per docs.
- *  8s is not listed in the official docs, but the app defaults shots to
- *  8s and users expect 720P to work as a fallback when 768P is not
- *  supported for the requested duration. */
+/** Hailuo family (2.3 / 2.3-Fast / 02) — full table per docs. */
 const HAILUO_RESOLUTION_TABLE: Record<number, readonly string[]> = {
   // 6s: 768P default or 1080P (plus 512P for Hailuo-02 i2v only)
   6: ["768P", "1080P"],
-  // 8s: docs don't list it; allow 720P as a user-requested fallback.
-  8: ["720P"],
   // 10s: 768P only
   10: ["768P"],
 };
@@ -156,22 +151,35 @@ export function allowedResolutionsFor(
   return ["768P", "1080P"];
 }
 
+/** Snap an requested duration to a value the model actually supports.
+ *  Hailuo only supports 6s and 10s; I2V-01 only supports 6s. */
+export function normalizeMiniMaxDuration(
+  model: string,
+  duration: number,
+): number {
+  if (isHailuoFamily(model)) {
+    // Hailuo supports 6s and 10s. Round shorter requests to 6s, longer
+    // requests to 10s so the API never receives an unsupported duration.
+    return duration <= 7 ? 6 : 10;
+  }
+  if (isI2V01Family(model)) {
+    return 6;
+  }
+  return duration;
+}
+
 /** Default resolution for a model+duration.  Matches the docs' stated
- *  default (`768P` for Hailuo, `720P` for I2V-01 family). Falls back to
- *  the first allowed resolution when 768P is not supported for the
- *  requested duration (e.g. Hailuo @ 8s only allows 720P). */
+ *  default (`768P` for Hailuo, `720P` for I2V-01 family). */
 export function defaultResolutionFor(
   model: string,
   duration: number,
 ): string {
   if (isHailuoFamily(model)) {
-    const allowed = allowedResolutionsFor(model, duration);
-    if (allowed.length > 0) {
-      // Prefer the docs' default 768P when available; otherwise use the
-      // first supported resolution (e.g. 720P for 8s).
-      return allowed.includes("768P") ? "768P" : allowed[0];
-    }
-    return "768P";
+    // Hailuo-02 I2V also accepts 512P, but docs still mark 768P as the
+    // default ("768P (默认)" in the resolution table). Stay with 768P
+    // unless/until docs change.
+    if (HAILUO_RESOLUTION_TABLE[duration]?.includes("768P")) return "768P";
+    return HAILUO_RESOLUTION_TABLE[duration]?.[0] ?? "768P";
   }
   if (isI2V01Family(model)) {
     return "720P";

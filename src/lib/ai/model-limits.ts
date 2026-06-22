@@ -18,6 +18,15 @@ export const MODEL_MAX_DURATIONS: Record<string, number> = {
   "wan2.6-i2v": 10,
   "wan2.6-r2v": 10,
   "wan2.6-r2v-flash": 10,
+  // MiniMax Hailuo family supports 6s and 10s; cap at 10 so upstream
+  // code doesn't request longer durations. The provider snaps 8s to 10s.
+  "minimax-hailuo-02": 10,
+  "minimax-hailuo-2.3": 10,
+  "minimax-hailuo-2.3-fast": 10,
+  // MiniMax older I2V-01 family is 6s-only.
+  "i2v-01": 6,
+  "i2v-01-director": 6,
+  "i2v-01-live": 6,
 };
 
 /** Family-level fallback: if modelId contains this substring, use this duration */

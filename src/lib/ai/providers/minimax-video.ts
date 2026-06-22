@@ -1,6 +1,7 @@
 import type { VideoProvider, VideoGenerateParams, VideoGenerateResult } from "../types";
 import {
   defaultResolutionFor,
+  normalizeMiniMaxDuration,
   validateMiniMaxVideoRequest,
   type MiniMaxVideoMode,
 } from "./minimax-video-models";
@@ -149,8 +150,12 @@ export class MiniMaxVideoProvider implements VideoProvider {
    * `Hailuo-02` keyframe + 10s (only `768P` is allowed there).
    */
   private buildBody(params: VideoGenerateParams): Record<string, unknown> {
-    const duration = params.duration || 6;
+    const requestedDuration = params.duration || 6;
     const mode: MiniMaxVideoMode = this.detectMode(params);
+    // MiniMax endpoints only accept specific durations (6s/10s for Hailuo,
+    // 6s for I2V-01). Snap the requested value before picking resolution
+    // so we never send an unsupported duration to the API.
+    const duration = normalizeMiniMaxDuration(this.model, requestedDuration);
     const resolution = defaultResolutionFor(this.model, duration);
 
     // Validate up front so a user with the wrong model configured for
