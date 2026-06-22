@@ -558,3 +558,22 @@ test("defaultResolutionFor: docs-default 768P for Hailuo, 720P for I2V-01", () =
   assert.equal(defaultResolutionFor("MiniMax-Hailuo-02", 10), "768P");
   assert.equal(defaultResolutionFor("I2V-01-Director", 6), "720P");
 });
+
+test("defaultResolutionFor: Hailuo family falls back to allowed resolution when 768P unsupported", () => {
+  // 8s is not in the official docs, but the app defaults shots to 8s and
+  // expects 720P to be used as a fallback instead of erroring out.
+  assert.equal(defaultResolutionFor("MiniMax-Hailuo-02", 8), "720P");
+  assert.equal(defaultResolutionFor("MiniMax-Hailuo-2.3", 8), "720P");
+});
+
+test("validateMiniMaxVideoRequest: Hailuo family accepts 720P at 8s fallback duration", () => {
+  assert.equal(
+    validateMiniMaxVideoRequest({
+      model: "MiniMax-Hailuo-02",
+      mode: "keyframe",
+      duration: 8,
+      resolution: "720P",
+    }),
+    null,
+  );
+});
