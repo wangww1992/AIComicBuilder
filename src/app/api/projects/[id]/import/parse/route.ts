@@ -41,8 +41,12 @@ export async function POST(
       return NextResponse.json({ error: "Empty file" }, { status: 400 });
     }
 
+    // Store the full parsed text in metadata so a page reload mid-pipeline
+    // can rehydrate `fullText` (needed by step 3 split) without forcing the
+    // user to re-upload. Bounded by the 20MB file-size limit upstream.
     await addImportLog(projectId, 1, "done", `解析完成，共 ${text.length} 字`, {
       charCount: text.length,
+      text,
     });
 
     return NextResponse.json({ text, charCount: text.length });

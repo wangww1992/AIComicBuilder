@@ -32,6 +32,8 @@ import {
 } from "@/stores/project-store";
 
 type DrawerShot = Shot;
+type FrameTarget = "first_frame" | "last_frame";
+type FrameResults = Partial<Record<FrameTarget, { status: "ok" | "skipped" | "error"; fileUrl?: string; error?: string }>>;
 
 interface ShotDrawerProps {
   shots: DrawerShot[];
@@ -76,7 +78,8 @@ export function ShotDrawer({
   const [editDuration, setEditDuration] = useState(5);
 
   // Local generating state (independent of page-level anyGenerating)
-  const [generatingFrames, setGeneratingFrames] = useState(false);
+  const [generatingFrameTargets, setGeneratingFrameTargets] = useState<FrameTarget[]>([]);
+  const generatingFrames = generatingFrameTargets.length > 0;
   const [generatingSceneFrame, setGeneratingSceneFrame] = useState(false);
   const [generatingVideo, setGeneratingVideo] = useState(false);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
@@ -94,7 +97,7 @@ export function ShotDrawer({
     setEditVideoPrompt(shot.videoPrompt ?? "");
     setEditCameraDirection(shot.cameraDirection ?? "static");
     setEditDuration(shot.duration ?? 5);
-    setGeneratingFrames(false);
+    setGeneratingFrameTargets([]);
     setGeneratingSceneFrame(false);
     setGeneratingVideo(false);
     setGeneratingPrompt(false);
@@ -138,24 +141,30 @@ export function ShotDrawer({
     }
   }
 
-  async function handleGenerateFrames() {
+  async function handleGenerateFrames(targetFrames?: FrameTarget[]) {
     if (!imageGuard()) return;
-    setGeneratingFrames(true);
+    const activeTargets = targetFrames ?? ["first_frame", "last_frame"];
+    setGeneratingFrameTargets(activeTargets);
     try {
-      await apiFetch(`/api/projects/${projectId}/generate`, {
+      const response = await apiFetch(`/api/projects/${projectId}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "single_frame_generate",
-          payload: { shotId: shot!.id, ratio: videoRatio, versionId: selectedVersionId },
+          payload: { shotId: shot!.id, ratio: videoRatio, versionId: selectedVersionId, ...(targetFrames ? { targetFrames } : {}) },
           modelConfig: getModelConfig(),
         }),
       });
+      const data = await response.json().catch(() => ({})) as { frameResults?: FrameResults };
+      const errors = Object.entries(data.frameResults ?? {})
+        .filter(([, result]) => result.status === "error")
+        .map(([target, result]) => `${target === "first_frame" ? "首帧" : "尾帧"}: ${result.error ?? t("common.generationFailed")}`);
+      if (errors.length > 0) toast.error(errors.join("；"));
       onUpdate();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.generationFailed"));
     } finally {
-      setGeneratingFrames(false);
+      setGeneratingFrameTargets([]);
     }
   }
 
@@ -390,24 +399,42 @@ export function ShotDrawer({
             </p>
             {hasFrame && (
               <div className="mb-2 flex gap-2">
-                {frameAssets.map((asset, i) => (
-                  <div
-                    key={i}
-                    className={`overflow-hidden rounded-lg border border-[--border-subtle] bg-[--surface] cursor-pointer hover:opacity-80 transition-opacity ${generationMode === "reference" ? "w-full" : "flex-1"}`}
-                    onClick={() => asset.src && setPreviewSrc(uploadUrl(asset.src))}
-                  >
-                    {asset.src
-                      ? <img src={uploadUrl(asset.src)} className="w-full object-contain" alt={asset.label} />
-                      : <div className="flex h-16 items-center justify-center"><ImageIcon className="h-4 w-4 text-[--text-muted]" /></div>
-                    }
-                  </div>
-                ))}
+                {frameAssets.map((asset, i) => {
+                  const target = i === 0 ? "first_frame" as const : "last_frame" as const;
+                  const isGeneratingTarget = generatingFrameTargets.includes(target);
+                  return (
+                    <div
+                      key={i}
+                      className={`overflow-hidden rounded-lg border border-[--border-subtle] bg-[--surface] ${generationMode === "reference" ? "w-full" : "flex-1"}`}
+                    >
+                      <div
+                        className="cursor-pointer hover:opacity-80 transition-opacity"
+                        onClick={() => asset.src && setPreviewSrc(uploadUrl(asset.src))}
+                      >
+                        {asset.src
+                          ? <img src={uploadUrl(asset.src)} className="w-full object-contain" alt={asset.label} />
+                          : <div className="flex h-16 items-center justify-center"><ImageIcon className="h-4 w-4 text-[--text-muted]" /></div>
+                        }
+                      </div>
+                      {generationMode === "keyframe" && (
+                        <button
+                          onClick={() => handleGenerateFrames([target])}
+                          disabled={generatingFrames || anyGenerating}
+                          className="flex w-full items-center justify-center gap-1 border-t border-[--border-subtle] px-2 py-1 text-[10px] text-[--text-muted] hover:bg-[--bg-muted] hover:text-primary disabled:opacity-40"
+                        >
+                          {isGeneratingTarget ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <RefreshCw className="h-2.5 w-2.5" />}
+                          {asset.src ? "重生成" : "生成"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
             <Button
               size="xs"
               variant={!hasFrame ? "default" : "outline"}
-              onClick={generationMode === "reference" ? handleGenerateSceneFrame : handleGenerateFrames}
+              onClick={generationMode === "reference" ? handleGenerateSceneFrame : () => handleGenerateFrames()}
               disabled={generatingFrames || generatingSceneFrame || anyGenerating}
             >
               {(generatingFrames || generatingSceneFrame) ? <Loader2 className="h-3 w-3 animate-spin" /> : <ImageIcon className="h-3 w-3" />}

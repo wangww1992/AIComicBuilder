@@ -26,7 +26,15 @@ export async function GET(
     .where(eq(importLogs.projectId, projectId))
     .orderBy(asc(importLogs.createdAt));
 
-  return NextResponse.json(logs);
+  // Internal chunk-cache rows (written by the per-chunk retry path in
+  // step 2) are stored in this same table so they survive across retries
+  // and get cleared by DELETE. They're not meant for the UI — filter them
+  // out so they neither clutter the log panel nor get picked up by the
+  // page's `find(l.status === "done" && l.metadata)` lookup for the final
+  // step-2 summary.
+  const visible = logs.filter((l) => !l.message?.startsWith("[chunk-cache] "));
+
+  return NextResponse.json(visible);
 }
 
 export async function DELETE(

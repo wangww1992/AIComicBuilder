@@ -108,6 +108,9 @@ interface ShotCardProps {
 const TRANSITION_VALUES = ["cut", "dissolve", "fade_in", "fade_out", "wipeleft", "slideright", "circleopen"] as const;
 
 type StepState = "done" | "generating" | "error" | "idle";
+type FrameTarget = "first_frame" | "last_frame";
+
+type FrameResults = Partial<Record<FrameTarget, { status: "ok" | "skipped" | "error"; fileUrl?: string; error?: string }>>;
 
 function StepIndicator({ state }: { state: StepState }) {
   if (state === "done") return <CheckCircle2 className="h-4 w-4 text-emerald-500 flex-shrink-0" />;
@@ -231,7 +234,8 @@ export function ShotCard({
   useEffect(() => { setEditDuration(duration); }, [duration]);
 
   // Generation state
-  const [generatingFrames, setGeneratingFrames] = useState(false);
+  const [generatingFrameTargets, setGeneratingFrameTargets] = useState<FrameTarget[]>([]);
+  const generatingFrames = generatingFrameTargets.length > 0;
   const [generatingSceneFrame, setGeneratingSceneFrame] = useState(false);
   const [generatingVideo, setGeneratingVideo] = useState(false);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
@@ -296,24 +300,30 @@ export function ShotCard({
     });
   }
 
-  async function handleGenerateFrames() {
+  async function handleGenerateFrames(targetFrames?: FrameTarget[]) {
     if (!imageGuard()) return;
-    setGeneratingFrames(true);
+    const activeTargets = targetFrames ?? ["first_frame", "last_frame"];
+    setGeneratingFrameTargets(activeTargets);
     try {
-      await apiFetch(`/api/projects/${projectId}/generate`, {
+      const response = await apiFetch(`/api/projects/${projectId}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "single_frame_generate",
-          payload: { shotId: id, ratio: videoRatio },
+          payload: { shotId: id, ratio: videoRatio, ...(targetFrames ? { targetFrames } : {}) },
           modelConfig: getModelConfig(),
         }),
       });
+      const data = await response.json().catch(() => ({})) as { status?: string; frameResults?: FrameResults; error?: string };
+      const errors = Object.entries(data.frameResults ?? {})
+        .filter(([, result]) => result.status === "error")
+        .map(([target, result]) => `${target === "first_frame" ? "首帧" : "尾帧"}: ${result.error ?? t("common.generationFailed")}`);
+      if (errors.length > 0) toast.error(errors.join("；"));
       onUpdate();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t("common.generationFailed"));
     }
-    setGeneratingFrames(false);
+    setGeneratingFrameTargets([]);
   }
 
   async function handleGenerateSceneFrame() {
@@ -1315,6 +1325,20 @@ export function ShotCard({
                         <Upload className="h-2.5 w-2.5" />
                         {t("common.upload")}
                       </button>
+                      {generationMode === "keyframe" && (() => {
+                        const target = asset.type as FrameTarget;
+                        const isGeneratingTarget = generatingFrameTargets.includes(target);
+                        return (
+                          <button
+                            onClick={() => handleGenerateFrames([target])}
+                            disabled={generatingFrames || batchGeneratingFrames}
+                            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[--text-muted] hover:bg-[--bg-muted] hover:text-primary disabled:opacity-40 transition-colors"
+                          >
+                            {isGeneratingTarget ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <RefreshCw className="h-2.5 w-2.5" />}
+                            {asset.src ? "重生成" : "生成"}
+                          </button>
+                        );
+                      })()}
                       <div className="flex-1" />
                       {asset.src && (
                         <button
@@ -1335,7 +1359,7 @@ export function ShotCard({
           <Button
             size="xs"
             variant={nextStep === "frame" ? "default" : "outline"}
-            onClick={generationMode === "reference" ? handleBatchGenerateRefImagesForShot : handleGenerateFrames}
+            onClick={generationMode === "reference" ? handleBatchGenerateRefImagesForShot : () => handleGenerateFrames()}
             disabled={generatingFrames || generatingSceneFrame || generatingVideo || batchGeneratingFrames}
           >
             {(generatingFrames || generatingSceneFrame || batchGeneratingFrames)

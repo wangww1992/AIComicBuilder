@@ -261,6 +261,7 @@
     "complete": "导入完成！",
     "newImport": "新建导入",
     "retry": "重试",
+    "retryStep1NeedsFile": "解析步骤需要重新选择源文件，请点击「新建导入」后重新上传",
     "showAll": "显示全部",
     "main": "主角",
     "guest": "配角",

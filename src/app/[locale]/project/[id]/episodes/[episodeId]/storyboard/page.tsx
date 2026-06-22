@@ -49,6 +49,9 @@ import { PromptEditButton } from "@/components/prompt-templates/prompt-edit-butt
 import { AgentPicker } from "@/components/agent-picker";
 import Link from "next/link";
 
+type FrameTarget = "first_frame" | "last_frame";
+type FrameResults = Partial<Record<FrameTarget, { status: "ok" | "skipped" | "error"; fileUrl?: string; error?: string }>>;
+
 export default function EpisodeStoryboardPage() {
   const t = useTranslations();
   const locale = useLocale();
@@ -133,6 +136,7 @@ export default function EpisodeStoryboardPage() {
     failed: string[]; // shot IDs that failed
   } | null>(null);
   const [lastFailedShots, setLastFailedShots] = useState<string[]>([]);
+  const [lastFailedFrameTargets, setLastFailedFrameTargets] = useState<Array<{ shotId: string; targetFrames: FrameTarget[] }>>([]);
   const [lastBatchAction, setLastBatchAction] = useState<string | null>(null);
   const [compareMode, setCompareMode] = useState(false);
   const [generatingRefPrompts, setGeneratingRefPrompts] = useState(false);
@@ -425,7 +429,7 @@ export default function EpisodeStoryboardPage() {
     setGeneratingFrames(true);
     setLastBatchAction("batch_frame_generate");
 
-    const targets = project.shots.filter((s) => overwrite ? true : !getFirstFrameUrl(s));
+    const targets = project.shots.filter((s) => overwrite ? true : !getFirstFrameUrl(s) || !getLastFrameUrl(s));
     setBatchProgress({ total: targets.length, completed: 0, failed: [] });
 
     try {
@@ -439,16 +443,24 @@ export default function EpisodeStoryboardPage() {
           episodeId: useProjectStore.getState().currentEpisodeId,
         }),
       });
-      const data = await response.json() as { results: Array<{ shotId?: string; status: string }> };
-      const failedIds = (data.results || []).filter((r) => r.status === "error").map((r) => r.shotId!).filter(Boolean);
+      const data = await response.json() as { results: Array<{ shotId?: string; status: string; frameResults?: FrameResults }> };
+      const failedFrameTargets = (data.results || [])
+        .map((r) => ({
+          shotId: r.shotId,
+          targetFrames: (Object.entries(r.frameResults ?? {}) as Array<[FrameTarget, { status: string }]>).filter(([, result]) => result.status === "error").map(([target]) => target),
+        }))
+        .filter((r): r is { shotId: string; targetFrames: FrameTarget[] } => !!r.shotId && r.targetFrames.length > 0);
+      const failedIds = Array.from(new Set(failedFrameTargets.map((r) => r.shotId)));
       const totalProcessed = data.results?.length || targets.length;
       setBatchProgress({ total: totalProcessed, completed: totalProcessed, failed: failedIds });
 
       if (failedIds.length > 0) {
         setLastFailedShots(failedIds);
+        setLastFailedFrameTargets(failedFrameTargets);
         toast.error(`${failedIds.length}/${totalProcessed} shots failed`);
       } else {
         setLastFailedShots([]);
+        setLastFailedFrameTargets([]);
         toast.success(`All ${totalProcessed} shots completed`);
       }
     } catch (err) {
@@ -765,7 +777,14 @@ export default function EpisodeStoryboardPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: singleAction,
-            payload: { shotId: shot.id, ratio: videoRatio, versionId: selectedVersionId },
+            payload: {
+              shotId: shot.id,
+              ratio: videoRatio,
+              versionId: selectedVersionId,
+              ...(lastBatchAction === "batch_frame_generate" && lastFailedFrameTargets.length > 0
+                ? { targetFrames: lastFailedFrameTargets.find((r) => r.shotId === shot.id)?.targetFrames }
+                : {}),
+            },
             modelConfig: getModelConfig(),
             episodeId: useProjectStore.getState().currentEpisodeId,
           }),

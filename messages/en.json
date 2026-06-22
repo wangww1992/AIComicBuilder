@@ -259,6 +259,7 @@
     "complete": "Import complete!",
     "newImport": "New Import",
     "retry": "Retry",
+    "retryStep1NeedsFile": "Parsing requires re-selecting the source file. Click \"New Import\" and upload again.",
     "showAll": "Show All",
     "main": "Main",
     "guest": "Guest",

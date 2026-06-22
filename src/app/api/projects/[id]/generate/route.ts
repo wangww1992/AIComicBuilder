@@ -57,6 +57,7 @@ import {
   getActiveAsset,
   insertAssetVersion,
   patchAsset,
+  type ShotAssetRow,
 } from "@/lib/shot-asset-utils";
 import { buildRefImagePromptsRequest } from "@/lib/ai/prompts/ref-image-prompts";
 import { buildKeyframePromptsRequest } from "@/lib/ai/prompts/keyframe-prompts";
@@ -148,6 +149,99 @@ interface ModelConfig {
   text?: ProviderConfig | null;
   image?: ProviderConfig | null;
   video?: ProviderConfig | null;
+}
+
+type FrameTarget = "first_frame" | "last_frame";
+type FrameResultStatus = "ok" | "skipped" | "error";
+type FrameResults = Partial<Record<FrameTarget, { status: FrameResultStatus; fileUrl?: string; error?: string }>>;
+
+const FRAME_TARGETS: FrameTarget[] = ["first_frame", "last_frame"];
+
+function parseFrameTargets(payload?: Record<string, unknown>): FrameTarget[] | NextResponse {
+  const rawTargets = payload?.targetFrames;
+  if (rawTargets === undefined) return FRAME_TARGETS;
+  if (!Array.isArray(rawTargets) || rawTargets.length === 0) {
+    return NextResponse.json({ error: "targetFrames must be a non-empty array" }, { status: 400 });
+  }
+
+  const targets: FrameTarget[] = [];
+  for (const raw of rawTargets) {
+    if (raw !== "first_frame" && raw !== "last_frame") {
+      return NextResponse.json({ error: "targetFrames can only include first_frame or last_frame" }, { status: 400 });
+    }
+    if (!targets.includes(raw)) targets.push(raw);
+  }
+  return targets;
+}
+
+function summarizeFrameResults(frameResults: FrameResults): "ok" | "partial" | "error" | "skipped" {
+  const results = Object.values(frameResults);
+  if (results.length === 0) return "skipped";
+  const okCount = results.filter((r) => r.status === "ok").length;
+  const errorCount = results.filter((r) => r.status === "error").length;
+  if (errorCount === 0 && okCount > 0) return "ok";
+  if (okCount > 0) return "partial";
+  if (errorCount > 0) return "error";
+  return "skipped";
+}
+
+async function persistGeneratedFrame(input: {
+  shotId: string;
+  type: FrameTarget;
+  existingAsset: ShotAssetRow | null;
+  prompt: string;
+  fileUrl: string;
+  characters?: string[];
+  modelConfig?: ProviderConfig | null;
+  meta?: Record<string, unknown> | null;
+}) {
+  const { shotId, type, existingAsset, prompt, fileUrl, characters, modelConfig, meta } = input;
+  if (existingAsset && !existingAsset.fileUrl) {
+    await patchAsset(existingAsset.id, {
+      fileUrl,
+      status: "completed",
+      prompt,
+      modelProvider: modelConfig?.protocol ?? null,
+      modelId: modelConfig?.modelId ?? null,
+      ...(meta !== undefined ? { meta } : {}),
+    });
+    return;
+  }
+
+  await insertAssetVersion({
+    shotId,
+    type,
+    sequenceInType: 0,
+    prompt,
+    fileUrl,
+    status: "completed",
+    characters,
+    modelProvider: modelConfig?.protocol ?? null,
+    modelId: modelConfig?.modelId ?? null,
+    ...(meta !== undefined ? { meta } : {}),
+  });
+}
+
+async function markFrameGenerationFailed(existingAsset: ShotAssetRow | null) {
+  if (existingAsset && !existingAsset.fileUrl) {
+    await patchAsset(existingAsset.id, { status: "failed" });
+  }
+}
+
+async function finalizeFrameShotStatus(shotId: string, hadFrameError: boolean) {
+  const [firstAsset, lastAsset] = await Promise.all([
+    getActiveAsset(shotId, "first_frame", 0),
+    getActiveAsset(shotId, "last_frame", 0),
+  ]);
+  const hasPair = !!(firstAsset?.fileUrl && lastAsset?.fileUrl);
+  const nextStatus = hasPair ? "completed" : hadFrameError ? "failed" : "pending";
+  await db.update(shots).set({ status: nextStatus }).where(eq(shots.id, shotId));
+}
+
+function shouldGenerateFrame(target: FrameTarget, targets: FrameTarget[], overwrite: boolean, legacy?: { firstFrame?: string | null; lastFrame?: string | null }) {
+  if (!targets.includes(target)) return false;
+  if (overwrite) return true;
+  return target === "first_frame" ? !legacy?.firstFrame : !legacy?.lastFrame;
 }
 
 async function findBoundAgent(projectId: string, category: AgentCategory) {
@@ -1275,7 +1369,7 @@ async function handleShotSplitStream(
         // until ITS timeout fires too — total wait = N × CHUNK_TIMEOUT_MS
         // instead of just CHUNK_TIMEOUT_MS.
         const abortController = new AbortController();
-        const CHUNK_TIMEOUT_MS = 120_000;
+        const CHUNK_TIMEOUT_MS = 300_000;
         // Per-chunk failure reasons, captured so the final `error`
         // event can include the first one instead of a generic message.
         const chunkErrorMessages = new Map<number, string>();
@@ -1651,6 +1745,9 @@ async function handleBatchFrameGenerate(
       { status: 400 }
     );
   }
+  const parsedTargets = parseFrameTargets(payload);
+  if (parsedTargets instanceof NextResponse) return parsedTargets;
+  const targetFrames = parsedTargets;
 
   const batchVersionId = payload?.versionId as string | undefined;
   const imageOpts = ratioToImageOpts(payload?.ratio as string | undefined);
@@ -1672,7 +1769,6 @@ async function handleBatchFrameGenerate(
     ? await getVersionedUploadDir(batchVersionId)
     : process.env.UPLOAD_DIR || "./uploads";
 
-  // Fetch only characters linked to this episode
   let frameCharacters: typeof characters.$inferSelect[];
   if (episodeId) {
     const linkedIds = await db
@@ -1693,24 +1789,28 @@ async function handleBatchFrameGenerate(
   const charsWithImages = frameCharacters.filter((c) => c.referenceImage);
 
   const ai = resolveImageProvider(modelConfig, versionedUploadDir);
-  const results: Array<{ shotId: string; sequence: number; status: string; firstFrame?: string; lastFrame?: string; error?: string }> = [];
+  const results: Array<{
+    shotId: string;
+    sequence: number;
+    status: string;
+    firstFrame?: string;
+    lastFrame?: string;
+    frameResults?: FrameResults;
+    error?: string;
+  }> = [];
 
   const overwrite = payload?.overwrite === true;
   const needProcess = allShots.filter((s) => {
     const v = allShotsLegacy.get(s.id);
-    return overwrite || !v?.firstFrame || !v?.lastFrame;
+    return targetFrames.some((target) => shouldGenerateFrame(target, targetFrames, overwrite, v));
   });
   const skipCount = allShots.length - needProcess.length;
 
-  console.log(`[BatchFrameGenerate] Total: ${allShots.length} shots, need: ${needProcess.length}, skip: ${skipCount}, characters: ${frameCharacters.length}`);
+  console.log(`[BatchFrameGenerate] Total: ${allShots.length} shots, need: ${needProcess.length}, skip: ${skipCount}, characters: ${frameCharacters.length}, targets: ${targetFrames.join(",")}`);
 
   const frameFirstSlots = await resolveSlotContents("frame_generate_first", { userId, projectId });
   const frameLastSlots = await resolveSlotContents("frame_generate_last", { userId, projectId });
 
-  // ── Concurrent per-shot generation ──
-  // Each shot is fully independent under the new shot_assets architecture:
-  // first/last frame prompts are pre-generated and stored, no continuity
-  // chain needed. Run all shots in parallel via Promise.allSettled.
   const total = allShots.length;
   let doneCount = 0;
   console.log(`[BatchFrameGenerate] Starting concurrent generation: 0/${total}`);
@@ -1718,25 +1818,27 @@ async function handleBatchFrameGenerate(
   const settled = await Promise.allSettled(
     allShots.map(async (shot) => {
       const shotLegacy = allShotsLegacy.get(shot.id);
+      const shotTargets = targetFrames.filter((target) => shouldGenerateFrame(target, targetFrames, overwrite, shotLegacy));
 
-      if (!overwrite && shotLegacy?.firstFrame && shotLegacy?.lastFrame) {
+      if (shotTargets.length === 0) {
         doneCount++;
+        const frameResults: FrameResults = Object.fromEntries(
+          targetFrames.map((target) => [target, { status: "skipped" as const }])
+        ) as FrameResults;
         console.log(`[BatchFrameGenerate] ⊙ shot ${shot.sequence} skipped (${doneCount}/${total})`);
         return {
           shotId: shot.id,
           sequence: shot.sequence,
           status: "skipped" as const,
+          frameResults,
         };
       }
 
       const startTime = Date.now();
+      const frameResults: FrameResults = {};
       try {
         await db.update(shots).set({ status: "generating" }).where(eq(shots.id, shot.id));
 
-        // Per-shot character filter: read the first_frame / last_frame asset
-        // characters metadata (set by handleGenerateKeyframePrompts). Only
-        // inject those characters' ref images into the image model, so shots
-        // only see their relevant characters.
         const ffAssetExisting = await getActiveAsset(shot.id, "first_frame", 0);
         const lfAssetExisting = await getActiveAsset(shot.id, "last_frame", 0);
         const shotCharNameSet = new Set<string>([
@@ -1750,69 +1852,93 @@ async function handleBatchFrameGenerate(
         const shotCharRefLabels = filteredChars.map((c) => c.name);
         const shotCharsForPersist = filteredChars.length > 0 ? filteredChars.map((c) => c.name) : undefined;
 
-        // Each shot is independent — generate its own first frame from prompt.
-        const firstPrompt = buildFirstFramePrompt({
-          sceneDescription: shot.prompt || "",
-          startFrameDesc: shotLegacy?.startFrameDesc || shot.prompt || "",
-          characterDescriptions,
-          slotContents: frameFirstSlots,
-        });
-        const firstFramePath = await ai.generateImage(firstPrompt, {
-          ...imageOpts,
-          quality: "hd",
-          referenceImages: shotCharRefImages,
-          referenceLabels: shotCharRefLabels,
-        });
+        let firstFramePath = ffAssetExisting?.fileUrl || shotLegacy?.firstFrame || undefined;
 
-        const lastPrompt = buildLastFramePrompt({
-          sceneDescription: shot.prompt || "",
-          endFrameDesc: shotLegacy?.endFrameDesc || shot.prompt || "",
-          characterDescriptions,
-          firstFramePath,
-          slotContents: frameLastSlots,
-        });
-        const lastFramePath = await ai.generateImage(lastPrompt, {
-          ...imageOpts,
-          quality: "hd",
-          referenceImages: [firstFramePath, ...shotCharRefImages],
-          referenceLabels: ["首帧/First Frame", ...shotCharRefLabels],
-        });
+        if (shotTargets.includes("first_frame")) {
+          try {
+            const firstPrompt = buildFirstFramePrompt({
+              sceneDescription: shot.prompt || "",
+              startFrameDesc: ffAssetExisting?.prompt || shotLegacy?.startFrameDesc || shot.prompt || "",
+              characterDescriptions,
+              slotContents: frameFirstSlots,
+            });
+            firstFramePath = await ai.generateImage(firstPrompt, {
+              ...imageOpts,
+              quality: "hd",
+              referenceImages: shotCharRefImages,
+              referenceLabels: shotCharRefLabels,
+            });
+            await persistGeneratedFrame({
+              shotId: shot.id,
+              type: "first_frame",
+              existingAsset: ffAssetExisting,
+              prompt: ffAssetExisting?.prompt || shotLegacy?.startFrameDesc || shot.prompt || "",
+              fileUrl: firstFramePath,
+              characters: shotCharsForPersist,
+              modelConfig: modelConfig.image,
+            });
+            frameResults.first_frame = { status: "ok", fileUrl: firstFramePath };
+          } catch (err) {
+            console.error(`[BatchFrameGenerate] First frame error for shot ${shot.sequence}:`, err);
+            await markFrameGenerationFailed(ffAssetExisting);
+            frameResults.first_frame = { status: "error", error: extractErrorMessage(err) };
+          }
+        }
 
-        await db.update(shots).set({ status: "completed" }).where(eq(shots.id, shot.id));
+        if (shotTargets.includes("last_frame")) {
+          if (!firstFramePath) {
+            const error = "First frame is required to generate last frame";
+            await markFrameGenerationFailed(lfAssetExisting);
+            frameResults.last_frame = { status: "error", error };
+          } else {
+            try {
+              const lastPrompt = buildLastFramePrompt({
+                sceneDescription: shot.prompt || "",
+                endFrameDesc: lfAssetExisting?.prompt || shotLegacy?.endFrameDesc || shot.prompt || "",
+                characterDescriptions,
+                firstFramePath,
+                slotContents: frameLastSlots,
+              });
+              const lastFramePath = await ai.generateImage(lastPrompt, {
+                ...imageOpts,
+                quality: "hd",
+                referenceImages: [firstFramePath, ...shotCharRefImages],
+                referenceLabels: ["首帧/First Frame", ...shotCharRefLabels],
+              });
+              await persistGeneratedFrame({
+                shotId: shot.id,
+                type: "last_frame",
+                existingAsset: lfAssetExisting,
+                prompt: lfAssetExisting?.prompt || shotLegacy?.endFrameDesc || shot.prompt || "",
+                fileUrl: lastFramePath,
+                characters: shotCharsForPersist,
+                modelConfig: modelConfig.image,
+                meta: { sourceFirstFrameUrl: firstFramePath },
+              });
+              frameResults.last_frame = { status: "ok", fileUrl: lastFramePath };
+            } catch (err) {
+              console.error(`[BatchFrameGenerate] Last frame error for shot ${shot.sequence}:`, err);
+              await markFrameGenerationFailed(lfAssetExisting);
+              frameResults.last_frame = { status: "error", error: extractErrorMessage(err) };
+            }
+          }
+        }
 
-        if (ffAssetExisting) await patchAsset(ffAssetExisting.id, { fileUrl: firstFramePath, status: "completed" });
-        else
-          await insertAssetVersion({
-            shotId: shot.id,
-            type: "first_frame",
-            sequenceInType: 0,
-            prompt: shotLegacy?.startFrameDesc ?? "",
-            fileUrl: firstFramePath,
-            status: "completed",
-            characters: shotCharsForPersist,
-          });
-        if (lfAssetExisting) await patchAsset(lfAssetExisting.id, { fileUrl: lastFramePath, status: "completed" });
-        else
-          await insertAssetVersion({
-            shotId: shot.id,
-            type: "last_frame",
-            sequenceInType: 0,
-            prompt: shotLegacy?.endFrameDesc ?? "",
-            fileUrl: lastFramePath,
-            status: "completed",
-            characters: shotCharsForPersist,
-          });
+        await finalizeFrameShotStatus(shot.id, Object.values(frameResults).some((r) => r.status === "error"));
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         doneCount++;
-        console.log(`[BatchFrameGenerate] ✓ shot ${shot.sequence} (${doneCount}/${total}) ${elapsed}s`);
+        const status = summarizeFrameResults(frameResults);
+        console.log(`[BatchFrameGenerate] ${status === "error" ? "✗" : "✓"} shot ${shot.sequence} (${doneCount}/${total}) ${elapsed}s`);
 
         return {
           shotId: shot.id,
           sequence: shot.sequence,
-          status: "ok" as const,
-          firstFrame: firstFramePath,
-          lastFrame: lastFramePath,
+          status,
+          firstFrame: frameResults.first_frame?.fileUrl,
+          lastFrame: frameResults.last_frame?.fileUrl,
+          frameResults,
+          error: Object.values(frameResults).find((r) => r.status === "error")?.error,
         };
       } catch (err) {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1823,6 +1949,7 @@ async function handleBatchFrameGenerate(
           shotId: shot.id,
           sequence: shot.sequence,
           status: "error" as const,
+          frameResults,
           error: extractErrorMessage(err),
         };
       }
@@ -1841,8 +1968,9 @@ async function handleBatchFrameGenerate(
   }
 
   const okCount = results.filter((r) => r.status === "ok").length;
+  const partialCount = results.filter((r) => r.status === "partial").length;
   const errCount = results.filter((r) => r.status === "error").length;
-  console.log(`[BatchFrameGenerate] Done: ${okCount} ok, ${errCount} errors, ${skipCount} skipped`);
+  console.log(`[BatchFrameGenerate] Done: ${okCount} ok, ${partialCount} partial, ${errCount} errors, ${skipCount} skipped`);
 
   return NextResponse.json({ results });
 }
@@ -1863,14 +1991,15 @@ async function handleSingleFrameGenerate(
   if (!modelConfig?.image) {
     return NextResponse.json({ error: "No image model configured" }, { status: 400 });
   }
+  const parsedTargets = parseFrameTargets(payload);
+  if (parsedTargets instanceof NextResponse) return parsedTargets;
+  const targetFrames = parsedTargets;
 
   const [shot] = await db.select().from(shots).where(eq(shots.id, shotId));
   if (!shot) {
     return NextResponse.json({ error: "Shot not found" }, { status: 404 });
   }
 
-  // Read prompts from shot_assets — they were generated by the dedicated
-  // "生成首尾帧提示词" step. Each shot is independent: no continuity chain.
   const ffAsset = await getActiveAsset(shotId, "first_frame", 0);
   const lfAsset = await getActiveAsset(shotId, "last_frame", 0);
   const startFramePromptText = ffAsset?.prompt || shot.prompt || "";
@@ -1884,8 +2013,6 @@ async function handleSingleFrameGenerate(
     .map((c) => `${c.name}: ${c.description}`)
     .join("\n");
 
-  // Per-shot character filter: only inject refs for characters declared
-  // on the first_frame / last_frame asset metadata for this shot.
   const shotCharNameSet = new Set<string>([
     ...(ffAsset?.characters ?? []),
     ...(lfAsset?.characters ?? []),
@@ -1894,6 +2021,7 @@ async function handleSingleFrameGenerate(
     ? projectCharacters.filter((c) => c.referenceImage && shotCharNameSet.has(c.name))
     : projectCharacters.filter((c) => c.referenceImage);
   const shotCharRefImages = filteredChars.map((c) => c.referenceImage as string);
+  const shotCharsForPersist = filteredChars.length > 0 ? filteredChars.map((c) => c.name) : undefined;
 
   const ai = resolveImageProvider(modelConfig, versionedUploadDir);
   const imageOpts = ratioToImageOpts(payload?.ratio as string | undefined);
@@ -1901,63 +2029,88 @@ async function handleSingleFrameGenerate(
   const frameFirstSlots = await resolveSlotContents("frame_generate_first", { userId, projectId });
   const frameLastSlots = await resolveSlotContents("frame_generate_last", { userId, projectId });
 
-  try {
-    await db.update(shots).set({ status: "generating" }).where(eq(shots.id, shotId));
+  const frameResults: FrameResults = {};
+  let firstFramePath = ffAsset?.fileUrl ?? undefined;
 
-    const firstPrompt = buildFirstFramePrompt({
-      sceneDescription: shot.prompt || "",
-      startFrameDesc: startFramePromptText,
-      characterDescriptions,
-      slotContents: frameFirstSlots,
-    });
-    const firstFramePath = await ai.generateImage(firstPrompt, {
-      ...imageOpts,
-      quality: "hd",
-      referenceImages: shotCharRefImages,
-    });
+  await db.update(shots).set({ status: "generating" }).where(eq(shots.id, shotId));
 
-    const lastPrompt = buildLastFramePrompt({
-      sceneDescription: shot.prompt || "",
-      endFrameDesc: endFramePromptText,
-      characterDescriptions,
-      firstFramePath,
-      slotContents: frameLastSlots,
-    });
-    const lastFramePath = await ai.generateImage(lastPrompt, {
-      ...imageOpts,
-      quality: "hd",
-      referenceImages: [firstFramePath, ...shotCharRefImages],
-    });
-
-    await db.update(shots).set({ status: "completed" }).where(eq(shots.id, shotId));
-
-    if (ffAsset) await patchAsset(ffAsset.id, { fileUrl: firstFramePath, status: "completed" });
-    else
-      await insertAssetVersion({
+  if (targetFrames.includes("first_frame")) {
+    try {
+      const firstPrompt = buildFirstFramePrompt({
+        sceneDescription: shot.prompt || "",
+        startFrameDesc: startFramePromptText,
+        characterDescriptions,
+        slotContents: frameFirstSlots,
+      });
+      firstFramePath = await ai.generateImage(firstPrompt, {
+        ...imageOpts,
+        quality: "hd",
+        referenceImages: shotCharRefImages,
+      });
+      await persistGeneratedFrame({
         shotId,
         type: "first_frame",
-        sequenceInType: 0,
+        existingAsset: ffAsset,
         prompt: startFramePromptText,
         fileUrl: firstFramePath,
-        status: "completed",
+        characters: shotCharsForPersist,
+        modelConfig: modelConfig.image,
       });
-    if (lfAsset) await patchAsset(lfAsset.id, { fileUrl: lastFramePath, status: "completed" });
-    else
-      await insertAssetVersion({
-        shotId,
-        type: "last_frame",
-        sequenceInType: 0,
-        prompt: endFramePromptText,
-        fileUrl: lastFramePath,
-        status: "completed",
-      });
-
-    return NextResponse.json({ shotId, firstFrame: firstFramePath, lastFrame: lastFramePath, status: "ok" });
-  } catch (err) {
-    console.error(`[SingleFrameGenerate] Error for shot ${shotId}:`, err);
-    await db.update(shots).set({ status: "failed" }).where(eq(shots.id, shotId));
-    return NextResponse.json({ shotId, status: "error", error: extractErrorMessage(err) }, { status: 500 });
+      frameResults.first_frame = { status: "ok", fileUrl: firstFramePath };
+    } catch (err) {
+      console.error(`[SingleFrameGenerate] First frame error for shot ${shotId}:`, err);
+      await markFrameGenerationFailed(ffAsset);
+      frameResults.first_frame = { status: "error", error: extractErrorMessage(err) };
+    }
   }
+
+  if (targetFrames.includes("last_frame")) {
+    if (!firstFramePath) {
+      const error = "First frame is required to generate last frame";
+      await markFrameGenerationFailed(lfAsset);
+      frameResults.last_frame = { status: "error", error };
+    } else {
+      try {
+        const lastPrompt = buildLastFramePrompt({
+          sceneDescription: shot.prompt || "",
+          endFrameDesc: endFramePromptText,
+          characterDescriptions,
+          firstFramePath,
+          slotContents: frameLastSlots,
+        });
+        const lastFramePath = await ai.generateImage(lastPrompt, {
+          ...imageOpts,
+          quality: "hd",
+          referenceImages: [firstFramePath, ...shotCharRefImages],
+        });
+        await persistGeneratedFrame({
+          shotId,
+          type: "last_frame",
+          existingAsset: lfAsset,
+          prompt: endFramePromptText,
+          fileUrl: lastFramePath,
+          characters: shotCharsForPersist,
+          modelConfig: modelConfig.image,
+          meta: { sourceFirstFrameUrl: firstFramePath },
+        });
+        frameResults.last_frame = { status: "ok", fileUrl: lastFramePath };
+      } catch (err) {
+        console.error(`[SingleFrameGenerate] Last frame error for shot ${shotId}:`, err);
+        await markFrameGenerationFailed(lfAsset);
+        frameResults.last_frame = { status: "error", error: extractErrorMessage(err) };
+      }
+    }
+  }
+
+  await finalizeFrameShotStatus(shotId, Object.values(frameResults).some((r) => r.status === "error"));
+
+  return NextResponse.json({
+    shotId,
+    firstFrame: frameResults.first_frame?.fileUrl,
+    lastFrame: frameResults.last_frame?.fileUrl,
+    status: summarizeFrameResults(frameResults),
+    frameResults,
+  });
 }
 
 // --- single_video_generate: synchronous video generation for one shot ---

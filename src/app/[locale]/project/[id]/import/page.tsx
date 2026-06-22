@@ -100,18 +100,52 @@ export default function ImportPage({
         if (data.length > 0) {
           setLogs(data);
           setHistoryMode(true);
-          // Determine last completed step
-          const doneSteps = data.filter((l: LogEntry) => l.status === "done").map((l: LogEntry) => l.step);
-          const maxDone = Math.max(0, ...doneSteps) as Step | 0;
-          setCurrentStep(maxDone);
-          for (let s = 1; s <= 4; s++) {
-            const stepLogs = data.filter((l: LogEntry) => l.step === s);
-            if (stepLogs.some((l: LogEntry) => l.status === "error")) {
-              setStepStatus((prev) => ({ ...prev, [s]: "error" }));
-            } else if (stepLogs.some((l: LogEntry) => l.status === "done")) {
-              setStepStatus((prev) => ({ ...prev, [s]: "done" }));
+          // Determine each step's status from the LAST log of that step,
+          // not "any error → error". A previous failed attempt followed by
+          // a successful retry should land on "done", not "error" — the
+          // retry's success log is what matters. Logs come from the server
+          // sorted by createdAt asc.
+          const lastDoneStep: Step | 0 = (() => {
+            let max: Step | 0 = 0;
+            for (let s = 1; s <= 4; s++) {
+              const stepLogs = (data as LogEntry[]).filter((l) => l.step === s);
+              const last = stepLogs[stepLogs.length - 1];
+              if (last?.status === "done" && s > max) max = s as Step;
             }
+            return max;
+          })();
+          setCurrentStep(lastDoneStep);
+          for (let s = 1; s <= 4; s++) {
+            const stepLogs = (data as LogEntry[]).filter((l) => l.step === s);
+            const last = stepLogs[stepLogs.length - 1];
+            if (!last) continue;
+            if (last.status === "done") {
+              setStepStatus((prev) => ({ ...prev, [s]: "done" }));
+            } else if (last.status === "error") {
+              setStepStatus((prev) => ({ ...prev, [s]: "error" }));
+            }
+            // "running" is treated as idle — a stale running log from a
+            // crashed request shouldn't block the user from retrying.
           }
+          // Rehydrate per-step results from log metadata so the user can
+          // continue from where they left off (review characters, kick off
+          // split, edit episodes, generate). Without this, after a reload
+          // the state arrays stay empty and the review panels can't render.
+          const meta = (step: number) => {
+            const log = [...data]
+              .reverse()
+              .find((l: LogEntry) => l.step === step && l.status === "done" && l.metadata);
+            return log?.metadata as Record<string, unknown> | undefined;
+          };
+          const m1 = meta(1);
+          if (typeof m1?.text === "string") setFullText(m1.text);
+          const m2 = meta(2);
+          if (Array.isArray(m2?.characters)) setCharacters(m2.characters as ExtractedCharacter[]);
+          if (Array.isArray(m2?.relationships)) {
+            setRelationships(m2.relationships as Array<{ characterA: string; characterB: string; relationType: string; description?: string }>);
+          }
+          const m3 = meta(3);
+          if (Array.isArray(m3?.episodes)) setEpisodes(m3.episodes as SplitEpisode[]);
         }
       } catch {
         // No logs, fresh import
@@ -314,7 +348,13 @@ export default function ImportPage({
     const failedStep = ([1, 2, 3, 4] as Step[]).find((s) => stepStatus[s] === "error");
     if (!failedStep) return;
     switch (failedStep) {
-      case 1: // Re-run full pipeline (need file again)
+      case 1:
+        // Step 1 needs the original File which can't be persisted across
+        // reloads. Tell the user instead of silently no-op'ing.
+        if (!file) {
+          toast.error(t("retryStep1NeedsFile"));
+          return;
+        }
         startPipeline();
         break;
       case 2:
@@ -369,10 +409,13 @@ export default function ImportPage({
     return base;
   };
 
-  // Show characters review after step 2 done + step 3 idle
-  const showCharReview = stepStatus[2] === "done" && stepStatus[3] === "idle" && !historyMode;
-  // Show episodes review after step 3 done + step 4 idle
-  const showEpReview = stepStatus[3] === "done" && stepStatus[4] === "idle" && !historyMode;
+  // Review panels gate purely on step status: if step 2 is done and step 3
+  // hasn't started, the user should be able to confirm characters and
+  // kick off split — including after a page reload (historyMode). Same
+  // for step 3 → step 4. We additionally require the rehydrated state to
+  // be present, otherwise the action buttons would post empty payloads.
+  const showCharReview = stepStatus[2] === "done" && stepStatus[3] === "idle" && characters.length > 0;
+  const showEpReview = stepStatus[3] === "done" && stepStatus[4] === "idle" && episodes.length > 0;
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)] overflow-hidden">
@@ -680,7 +723,7 @@ export default function ImportPage({
               </div>
 
               {/* Retry button when a step has failed */}
-              {([1, 2, 3, 4] as Step[]).some((s) => stepStatus[s] === "error") && !historyMode && (
+              {([1, 2, 3, 4] as Step[]).some((s) => stepStatus[s] === "error") && (
                 <Button
                   variant="outline"
                   size="sm"
