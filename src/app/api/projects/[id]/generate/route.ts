@@ -1530,32 +1530,52 @@ async function handleShotSplitStream(
 
         for (const shot of allShots) {
           const shotId = genId();
-          await db.insert(shots).values({
-            id: shotId,
-            projectId,
-            versionId,
-            sequence: shot.sequence,
-            prompt: shot.sceneDescription,
-            motionScript: shot.motionScript,
-            videoScript: shot.videoScript ?? null,
-            cameraDirection: shot.cameraDirection || "static",
-            duration: shot.duration,
-            transitionIn: shot.transitionIn || "cut",
-            transitionOut: shot.transitionOut || "cut",
-            compositionGuide: shot.compositionGuide || "",
-            focalPoint: shot.focalPoint || "",
-            depthOfField: shot.depthOfField || "medium",
-            soundDesign: shot.soundDesign || "",
-            musicCue: shot.musicCue || "",
-            episodeId: episodeId ?? null,
-          });
+          try {
+            await db.insert(shots).values({
+              id: shotId,
+              projectId,
+              versionId,
+              sequence: shot.sequence,
+              prompt: shot.sceneDescription,
+              motionScript: shot.motionScript,
+              videoScript: shot.videoScript ?? null,
+              cameraDirection: shot.cameraDirection || "static",
+              duration: shot.duration,
+              transitionIn: shot.transitionIn || "cut",
+              transitionOut: shot.transitionOut || "cut",
+              compositionGuide: shot.compositionGuide || "",
+              focalPoint: shot.focalPoint || "",
+              depthOfField: shot.depthOfField || "medium",
+              soundDesign: shot.soundDesign || "",
+              musicCue: shot.musicCue || "",
+              episodeId: episodeId ?? null,
+            });
+          } catch (shotErr) {
+            console.error(
+              `[ShotSplit] Failed to insert shot ${shot.sequence}: projectId=${projectId} versionId=${versionId} episodeId=${episodeId ?? "null"}`,
+              shotErr,
+            );
+            throw shotErr;
+          }
 
           for (let i = 0; i < (shot.dialogues || []).length; i++) {
             const dialogue = shot.dialogues[i];
+            if (!dialogue?.character || !dialogue.text) {
+              console.warn(
+                `[ShotSplit] Skipping incomplete dialogue for shot ${shot.sequence}: missing character or text`,
+              );
+              continue;
+            }
             const matchedChar = shotCharacters.find(
               (c: typeof characters.$inferSelect) => c.name === dialogue.character,
             );
-            if (matchedChar) {
+            if (!matchedChar) {
+              console.warn(
+                `[ShotSplit] No character match for dialogue in shot ${shot.sequence}: "${dialogue.character}" (available: ${shotCharacters.map((c) => c.name).join(", ")})`,
+              );
+              continue;
+            }
+            try {
               await db.insert(dialogues).values({
                 id: genId(),
                 shotId,
@@ -1563,6 +1583,12 @@ async function handleShotSplitStream(
                 text: dialogue.text,
                 sequence: i,
               });
+            } catch (dialogueErr) {
+              console.error(
+                `[ShotSplit] Failed to insert dialogue for shot ${shot.sequence}: char="${matchedChar.name}" charId=${matchedChar.id} shotId=${shotId}`,
+                dialogueErr,
+              );
+              throw dialogueErr;
             }
           }
         }
@@ -4239,17 +4265,33 @@ async function handleGenerateKeyframePrompts(
         const result = await textProvider.generateText(promptRequest, {
           systemPrompt: keyframeSystemPrompt,
           temperature: 0.5,
+          maxTokens: 4096,
         });
 
         const jsonMatch = result.match(/\[[\s\S]*\]/);
         if (!jsonMatch) {
+          console.warn(`[GenerateKeyframePrompts] shot ${shot.sequence}: no JSON array found in response:\n${result.slice(0, 2000)}`);
           throw new Error(`Shot ${shot.sequence}: invalid JSON response`);
         }
-        const parsed = JSON.parse(extractJSON(result)) as Array<{
+        let parsed: Array<{
           shotSequence: number;
           characters?: string[];
           prompts: string[];
         }>;
+        try {
+          parsed = JSON.parse(extractJSON(jsonMatch[0])) as Array<{
+            shotSequence: number;
+            characters?: string[];
+            prompts: string[];
+          }>;
+        } catch (parseErr) {
+          console.warn(
+            `[GenerateKeyframePrompts] shot ${shot.sequence}: JSON parse failed (${
+              parseErr instanceof Error ? parseErr.message : String(parseErr)
+            }). Response snippet:\n${result.slice(0, 2000)}`,
+          );
+          throw parseErr;
+        }
         const entry = parsed.find((e) => e.shotSequence === shot.sequence) || parsed[0];
         if (!entry || !Array.isArray(entry.prompts) || entry.prompts.length < 2) {
           throw new Error(`Shot ${shot.sequence}: expected 2 prompts (first/last frame)`);
