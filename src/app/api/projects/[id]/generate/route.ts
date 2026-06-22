@@ -1263,13 +1263,19 @@ async function handleShotSplitStream(
   const systemPrompt = shotSplitDef.buildFullPrompt(shotSplitSlots, { maxDuration: videoMaxDuration });
   const jsonMode = { openai: { response_format: { type: "json_object" } } };
 
-  // Split screenplay into chunks by SCENE markers (~8 scenes per chunk)
+  // Split screenplay into chunks by SCENE markers (~4 scenes per chunk).
+  // We keep chunks small because the shot-split prompt asks the LLM to emit
+  // very detailed per-shot fields (startFrame/endFrame/motionScript/videoScript/
+  // referenceImagePrompts/etc.). With 8 scenes per chunk, MiniMax-M3 frequently
+  // hits the 8192-token output ceiling and returns truncated JSON. 4 scenes
+  // keeps each response well under the limit while still parallelizing enough
+  // to be efficient.
   const fullScript = script || "";
-  const sceneChunks = splitScriptByScenes(fullScript, 8);
+  const sceneChunks = splitScriptByScenes(fullScript, 4);
   // Log scene detection details
   const sceneRe = /^[\s*#]*(?:SCENE|场景)\s*\d+/i;
   const sceneMatches = fullScript.split("\n").filter((l) => sceneRe.test(l.trim()));
-  console.log(`[ShotSplit] Detected ${sceneMatches.length} scenes, split into ${sceneChunks.length} chunk(s) of ~8 scenes each`);
+  console.log(`[ShotSplit] Detected ${sceneMatches.length} scenes, split into ${sceneChunks.length} chunk(s) of ~4 scenes each`);
   sceneChunks.forEach((c, i) => {
     const sceneCount = c.split("\n").filter((l) => sceneRe.test(l.trim())).length;
     console.log(`[ShotSplit] Chunk ${i + 1}: ${sceneCount} scenes, ${c.length} chars`);
@@ -1447,19 +1453,29 @@ async function handleShotSplitStream(
                   `in=${tokens.input}, out=${tokens.output} (reason=${tokens.reasoning}, text=${tokens.text}), total=${tokens.total}`,
               );
 
-              const parsed = JSON.parse(extractJSON(result.text));
+              const parseResult = parseShotSplitJSON(result.text);
+              if (!parseResult.ok) {
+                throw new Error(parseResult.originalError ?? "无法解析镜头拆分结果");
+              }
+              const { parsed, truncated } = parseResult as { parsed: unknown[]; truncated: boolean };
+              if (truncated) {
+                console.warn(
+                  `[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length}: response was truncated; recovered ${parsed.length} complete scene(s)`,
+                );
+              }
               let shotList: ParsedShot[];
-              if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].shots) {
-                shotList = parsed.flatMap((scene: { sceneDescription?: string; shots?: ParsedShot[] }) =>
+              const firstItem = parsed[0] as Record<string, unknown> | undefined;
+              if (Array.isArray(parsed) && parsed.length > 0 && firstItem?.shots) {
+                shotList = (parsed as Array<{ shots?: ParsedShot[]; sceneDescription?: string }>).flatMap((scene) =>
                   (scene.shots || []).map((s) => ({
                     ...s,
                     sceneDescription: s.sceneDescription || scene.sceneDescription || "",
                   })),
                 );
               } else if (Array.isArray(parsed)) {
-                shotList = parsed;
+                shotList = parsed as ParsedShot[];
               } else {
-                shotList = parsed.shots || [];
+                shotList = (parsed as { shots?: ParsedShot[] }).shots || [];
               }
               console.log(
                 `[ShotSplit] Chunk ${idx + 1}/${sceneChunks.length}: ${shotList.length} shots, keys: ${shotList[0] ? Object.keys(shotList[0]).join(",") : "empty"}`,
@@ -1613,6 +1629,79 @@ function splitScriptByScenes(script: string, maxScenes: number): string[] {
   }
 
   return chunks;
+}
+
+type ShotSplitParseResult =
+  | { ok: true; parsed: unknown; truncated: boolean }
+  | { ok: false; originalError: string };
+
+/**
+ * Try to parse the LLM response for shot_split. The response is a JSON array
+ * of scenes; if the model hits its output-token ceiling the array is truncated
+ * mid-element. In that case we attempt to drop the incomplete trailing element
+ * and close the array so earlier scenes are not lost.
+ */
+function parseShotSplitJSON(rawText: string): ShotSplitParseResult {
+  const text = extractJSON(rawText);
+  try {
+    return { ok: true, parsed: JSON.parse(text), truncated: false };
+  } catch (err) {
+    const originalError = err instanceof Error ? err.message : String(err);
+
+    // Only arrays are expected from shot_split; objects would be a single scene.
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("[")) {
+      return { ok: false, originalError };
+    }
+
+    // Walk forward to find the last position where a top-level object/array
+    // element is fully closed (stack depth returns to 1, the outer array).
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let lastSafeClose = -1;
+    for (let i = 0; i < trimmed.length; i++) {
+      const c = trimmed[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === "\\" && inString) {
+        escape = true;
+        continue;
+      }
+      if (c === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+
+      if (c === "[" || c === "{") {
+        depth++;
+      } else if (c === "]" || c === "}") {
+        depth--;
+        if (depth === 1) {
+          // Only treat as a safe close if followed by `,` or `]` at depth 1
+          // (gives a stronger signal that this is an element boundary).
+          const nextNonSpace = trimmed.slice(i + 1).match(/^[\s]*(.)/);
+          if (nextNonSpace && (nextNonSpace[1] === "," || nextNonSpace[1] === "]")) {
+            lastSafeClose = i;
+          }
+        }
+      }
+    }
+
+    if (lastSafeClose > 0) {
+      const recovered = trimmed.slice(0, lastSafeClose + 1) + "]";
+      try {
+        return { ok: true, parsed: JSON.parse(recovered), truncated: true };
+      } catch {
+        // Fall through to returning the original error.
+      }
+    }
+
+    return { ok: false, originalError };
+  }
 }
 
 // --- single_shot_rewrite: regenerate text fields for one shot ---
@@ -3108,7 +3197,7 @@ async function handleSingleVideoPrompt(
   // Reference mode: pass ALL scene reference frames (ordered) so multi-
   // scene shots (ground → sky etc.) get the full spatial context.
   const visionFrames: string[] = [];
-  let sceneMetaList: Array<{ sceneName?: string } | null> = [];
+  const sceneMetaList: Array<{ sceneName?: string } | null> = [];
   if (genMode === "reference") {
     const sceneAssets = shotView.referenceImages
       .filter((r) => r.fileUrl)
