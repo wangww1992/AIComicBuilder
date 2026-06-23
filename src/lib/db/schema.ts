@@ -27,6 +27,18 @@ export const projects = sqliteTable("projects", {
     .$defaultFn(() => new Date()),
 });
 
+export const comfyWorkflows = sqliteTable("comfy_workflows", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  capability: text("capability", { enum: ["image", "video"] }).notNull(),
+  workflowJson: text("workflow_json").notNull(),
+  outputNodeId: text("output_node_id"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const episodes = sqliteTable("episodes", {
   id: text("id").primaryKey(),
   projectId: text("project_id")
