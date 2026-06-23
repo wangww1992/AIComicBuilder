@@ -1,7 +1,6 @@
 "use client";
 
 import { use } from "react";
-import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Settings, Workflow } from "lucide-react";
 import { LanguageSwitcher } from "@/components/language-switcher";
@@ -13,7 +12,6 @@ export default function ProjectSettingsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id: projectId } = use(params);
-  const t = useTranslations("settings");
   const router = useRouter();
 
   return (
@@ -32,7 +30,7 @@ export default function ProjectSettingsPage({
               <Settings className="h-3.5 w-3.5" />
             </div>
             <span className="font-display text-sm font-semibold text-[--text-primary]">
-              {t("title")}
+              ComfyUI Workflows
             </span>
           </div>
         </div>

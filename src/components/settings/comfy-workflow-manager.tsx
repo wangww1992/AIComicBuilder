@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { apiFetch } from "@/lib/api-fetch";
 import { Trash2, Upload } from "lucide-react";
+import { toast } from "sonner";
 
 type Capability = "image" | "video";
 
@@ -30,6 +31,7 @@ export function ComfyWorkflowManager({ projectId, capability }: ComfyWorkflowMan
   const [cap, setCap] = useState<Capability>(capability ?? "image");
   const [json, setJson] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const url = capability
@@ -37,14 +39,22 @@ export function ComfyWorkflowManager({ projectId, capability }: ComfyWorkflowMan
       : `/api/projects/${projectId}/comfy-workflows`;
     apiFetch(url)
       .then((res) => res.json())
-      .then((data) => setWorkflows((data as { workflows: Workflow[] }).workflows ?? []))
-      .catch(() => {});
+      .then((data) => {
+        setWorkflows((data as { workflows: Workflow[] }).workflows ?? []);
+        setError(null);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "Failed to load workflows";
+        setError(message);
+        toast.error(message);
+      });
   }, [projectId, capability]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !json.trim()) return;
     setLoading(true);
+    setError(null);
     try {
       await apiFetch(`/api/projects/${projectId}/comfy-workflows`, {
         method: "POST",
@@ -58,18 +68,32 @@ export function ComfyWorkflowManager({ projectId, capability }: ComfyWorkflowMan
         : `/api/projects/${projectId}/comfy-workflows`;
       const refreshed = await apiFetch(url).then((res) => res.json()) as { workflows: Workflow[] };
       setWorkflows(refreshed.workflows ?? []);
+      toast.success("Workflow uploaded");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to upload workflow";
+      setError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
   }
 
   async function handleDelete(id: string) {
-    await apiFetch(`/api/projects/${projectId}/comfy-workflows?workflowId=${id}`, { method: "DELETE" });
-    const url = capability
-      ? `/api/projects/${projectId}/comfy-workflows?capability=${capability}`
-      : `/api/projects/${projectId}/comfy-workflows`;
-    const refreshed = await apiFetch(url).then((res) => res.json()) as { workflows: Workflow[] };
-    setWorkflows(refreshed.workflows ?? []);
+    if (!window.confirm("Delete this workflow?")) return;
+    setError(null);
+    try {
+      await apiFetch(`/api/projects/${projectId}/comfy-workflows?workflowId=${id}`, { method: "DELETE" });
+      const url = capability
+        ? `/api/projects/${projectId}/comfy-workflows?capability=${capability}`
+        : `/api/projects/${projectId}/comfy-workflows`;
+      const refreshed = await apiFetch(url).then((res) => res.json()) as { workflows: Workflow[] };
+      setWorkflows(refreshed.workflows ?? []);
+      toast.success("Workflow deleted");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to delete workflow";
+      setError(message);
+      toast.error(message);
+    }
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -87,6 +111,11 @@ export function ComfyWorkflowManager({ projectId, capability }: ComfyWorkflowMan
 
   return (
     <div className="space-y-4">
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600" role="alert">
+          {error}
+        </div>
+      )}
       <form onSubmit={handleSubmit} className="space-y-3 rounded-lg border border-[--border-subtle] p-4">
         <div className="space-y-1.5">
           <Label className="text-xs">{t("common.name")}</Label>
@@ -140,6 +169,7 @@ export function ComfyWorkflowManager({ projectId, capability }: ComfyWorkflowMan
               </div>
             </div>
             <button
+              aria-label="Delete workflow"
               onClick={() => handleDelete(w.id)}
               className="rounded p-1 hover:bg-red-50 hover:text-red-500"
             >
