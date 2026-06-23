@@ -18,7 +18,8 @@
     "batchPartialFailed": "Some items failed to generate. Please try again.",
     "promptTemplates": "Prompt Templates",
     "upload": "Upload",
-    "uploadFailed": "Upload failed. Please try again."
+    "uploadFailed": "Upload failed. Please try again.",
+    "name": "Name"
   },
   "dashboard": {
     "title": "My Projects",

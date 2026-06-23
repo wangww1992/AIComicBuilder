@@ -67,7 +67,7 @@ export default function ProjectLayout({
             <Wand2 className="h-4 w-4" />
           </Link>
           <Link
-            href={`/${locale}/settings`}
+            href={`/${locale}/project/${id}/settings`}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-[--text-muted] transition-all hover:bg-[--surface] hover:text-[--text-primary]"
           >
             <Settings className="h-4 w-4" />

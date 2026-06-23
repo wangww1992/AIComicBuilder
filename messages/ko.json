@@ -18,7 +18,8 @@
     "batchPartialFailed": "일부 항목 생성에 실패했습니다. 나중에 다시 시도해 주세요.",
     "promptTemplates": "프롬프트 관리",
     "upload": "업로드",
-    "uploadFailed": "업로드에 실패했습니다. 다시 시도해 주세요."
+    "uploadFailed": "업로드에 실패했습니다. 다시 시도해 주세요.",
+    "name": "이름"
   },
   "dashboard": {
     "title": "내 프로젝트",

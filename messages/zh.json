@@ -18,7 +18,8 @@
     "batchPartialFailed": "部分项目生成失败，请稍后重试",
     "promptTemplates": "提示词管理",
     "upload": "上传",
-    "uploadFailed": "上传失败，请重试"
+    "uploadFailed": "上传失败，请重试",
+    "name": "名称"
   },
   "dashboard": {
     "title": "我的项目",

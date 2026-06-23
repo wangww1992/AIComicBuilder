@@ -18,7 +18,8 @@
     "batchPartialFailed": "一部のアイテムの生成に失敗しました。後でもう一度お試しください。",
     "promptTemplates": "プロンプト管理",
     "upload": "アップロード",
-    "uploadFailed": "アップロードに失敗しました。もう一度お試しください。"
+    "uploadFailed": "アップロードに失敗しました。もう一度お試しください。",
+    "name": "名前"
   },
   "dashboard": {
     "title": "マイプロジェクト",
