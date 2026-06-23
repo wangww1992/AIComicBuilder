@@ -1,8 +1,5 @@
 import fs from "node:fs";
-import { eq } from "drizzle-orm";
-import { db } from "@/lib/db";
-import { comfyWorkflows } from "@/lib/db/schema";
-import { ComfyUIClient } from "./comfyui-client";
+import { ComfyUIClient } from "./comfyui-client.ts";
 
 export function detectOutputNodeId(workflow: Record<string, unknown>): string | null {
   const outputClassTypes = ["SaveImage", "VHS_VideoCombine", "SaveVideo"];
@@ -65,24 +62,3 @@ export async function uploadLoadImageNodes(
   return result;
 }
 
-export async function loadComfyUIWorkflow(
-  workflowId: string,
-  capability: "image" | "video",
-): Promise<{ baseWorkflow: Record<string, unknown>; outputNodeId: string }> {
-  const workflowRow = await db
-    .select()
-    .from(comfyWorkflows)
-    .where(eq(comfyWorkflows.id, workflowId))
-    .limit(1);
-  const workflowConfig = workflowRow[0];
-  if (!workflowConfig) throw new Error("ComfyUI workflow not found");
-  if (workflowConfig.capability !== capability) {
-    throw new Error(`Selected ComfyUI workflow is not a ${capability} workflow`);
-  }
-
-  const baseWorkflow = JSON.parse(workflowConfig.workflowJson) as Record<string, unknown>;
-  const outputNodeId = workflowConfig.outputNodeId ?? detectOutputNodeId(baseWorkflow);
-  if (!outputNodeId) throw new Error("ComfyUI workflow has no output node");
-
-  return { baseWorkflow, outputNodeId };
-}

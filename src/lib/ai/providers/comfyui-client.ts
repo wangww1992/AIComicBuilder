@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { id as genId } from "@/lib/id";
 
 interface QueueResponse {
   prompt_id: string;
@@ -8,11 +7,14 @@ interface QueueResponse {
 
 interface HistoryEntry {
   outputs?: Record<string, { images?: Array<{ filename: string }>; videos?: Array<{ filename: string }> }>;
-  status?: { completed?: boolean; status_str?: string };
 }
 
 export class ComfyUIClient {
-  constructor(private baseUrl: string) {}
+  private baseUrl: string;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
 
   private url(path: string): string {
     return `${this.baseUrl.replace(/\/$/, "")}${path}`;

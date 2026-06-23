@@ -2,13 +2,16 @@ import path from "node:path";
 import type { AIProvider, ImageOptions, TextOptions } from "../types";
 import { ComfyUIClient } from "./comfyui-client";
 import {
-  loadComfyUIWorkflow,
+  detectOutputNodeId,
   parseRatio,
   substitutePlaceholders,
   uploadImagePath,
   uploadLoadImageNodes,
 } from "./comfyui-workflows";
+import { db } from "@/lib/db";
+import { comfyWorkflows } from "@/lib/db/schema";
 import { id as genId } from "@/lib/id";
+import { eq } from "drizzle-orm";
 
 interface ComfyUIImageProviderParams {
   baseUrl: string;
@@ -32,10 +35,19 @@ export class ComfyUIImageProvider implements AIProvider {
   }
 
   async generateImage(prompt: string, options?: ImageOptions): Promise<string> {
-    const { baseWorkflow, outputNodeId } = await loadComfyUIWorkflow(
-      this.workflowId,
-      "image",
-    );
+    const workflowRow = await db
+      .select()
+      .from(comfyWorkflows)
+      .where(eq(comfyWorkflows.id, this.workflowId))
+      .limit(1);
+    const workflowConfig = workflowRow[0];
+    if (!workflowConfig) throw new Error("ComfyUI workflow not found");
+    if (workflowConfig.capability !== "image") {
+      throw new Error("Selected ComfyUI workflow is not an image workflow");
+    }
+    const baseWorkflow = JSON.parse(workflowConfig.workflowJson) as Record<string, unknown>;
+    const outputNodeId = workflowConfig.outputNodeId ?? detectOutputNodeId(baseWorkflow);
+    if (!outputNodeId) throw new Error("ComfyUI workflow has no output node");
 
     const placeholderValues: Record<string, string> = {
       prompt,
