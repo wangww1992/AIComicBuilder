@@ -14,6 +14,7 @@ interface ProviderSectionProps {
   icon: React.ReactNode;
   defaultProtocol: Protocol;
   defaultBaseUrl: string;
+  projectId?: string;
 }
 
 export function ProviderSection({
@@ -22,6 +23,7 @@ export function ProviderSection({
   icon,
   defaultProtocol,
   defaultBaseUrl,
+  projectId,
 }: ProviderSectionProps) {
   const t = useTranslations("settings");
   const { providers, addProvider, removeProvider } = useModelStore();
@@ -89,7 +91,7 @@ export function ProviderSection({
 
           {/* Provider form */}
           {selectedProvider ? (
-            <ProviderForm key={selectedProvider.id} provider={selectedProvider} />
+            <ProviderForm key={selectedProvider.id} provider={selectedProvider} projectId={projectId} />
           ) : (
             <div className="flex items-center justify-center rounded-xl border border-dashed border-[--border-subtle] bg-[--surface]/50 py-8">
               <p className="text-sm text-[--text-muted]">{t("selectProvider")}</p>

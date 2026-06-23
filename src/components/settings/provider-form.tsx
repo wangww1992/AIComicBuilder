@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import { useTranslations } from "next-intl";
 import { Loader2, Download, Plus, Eye, EyeOff, Trash2, Search } from "lucide-react";
 
 const DEFAULT_BASE_URLS: Record<Protocol, string> = {
-  comfyui: "http://localhost:8188",
+  comfyui: "http://127.0.0.1:8188",
   openai: "https://api.openai.com",
   gemini: "https://generativelanguage.googleapis.com",
   seedance: "https://ark.cn-beijing.volces.com",
@@ -42,6 +42,7 @@ function getProtocolOptions(capability: Capability): { value: Protocol; label: s
   }
   if (capability === "image") {
     return [
+      { value: "comfyui", label: "ComfyUI" },
       { value: "openai", label: "OpenAI" },
       { value: "gemini", label: "Gemini" },
       { value: "kling", label: "Kling" },
@@ -52,6 +53,7 @@ function getProtocolOptions(capability: Capability): { value: Protocol; label: s
   }
   // video
   return [
+    { value: "comfyui", label: "ComfyUI" },
     { value: "seedance", label: "Seedance" },
     { value: "ucloud-seedance", label: "Seedance (UCloud)" },
     { value: "gemini", label: "Gemini (Veo)" },
@@ -63,9 +65,10 @@ function getProtocolOptions(capability: Capability): { value: Protocol; label: s
 
 interface ProviderFormProps {
   provider: Provider;
+  projectId?: string;
 }
 
-export function ProviderForm({ provider }: ProviderFormProps) {
+export function ProviderForm({ provider, projectId }: ProviderFormProps) {
   const t = useTranslations("settings");
   const { updateProvider, setModels, toggleModel, addManualModel, removeModel } =
     useModelStore();
@@ -75,8 +78,17 @@ export function ProviderForm({ provider }: ProviderFormProps) {
   const [showKey, setShowKey] = useState(false);
   const [showSecretKey, setShowSecretKey] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
+  const [workflows, setWorkflows] = useState<Array<{ id: string; name: string; capability: string }>>([]);
 
   const isKling = provider.protocol === "kling";
+
+  useEffect(() => {
+    if (provider.protocol !== "comfyui" || !projectId) return;
+    fetch(`/api/projects/${projectId}/comfy-workflows?capability=${provider.capability}`)
+      .then((r) => r.json())
+      .then((data) => setWorkflows(data.workflows ?? []))
+      .catch(() => setWorkflows([]));
+  }, [provider.protocol, provider.capability, projectId]);
 
   async function handleFetchModels() {
     setFetching(true);
@@ -250,6 +262,23 @@ export function ProviderForm({ provider }: ProviderFormProps) {
         </div>
       )}
 
+      {/* Workflow selector for ComfyUI */}
+      {provider.protocol === "comfyui" && projectId && (
+        <div className="space-y-1.5">
+          <Label className="text-xs">ComfyUI Workflow</Label>
+          <select
+            value={provider.workflowId ?? ""}
+            onChange={(e) => updateProvider(provider.id, { workflowId: e.target.value || undefined })}
+            className="w-full rounded-lg border border-[--border-subtle] bg-transparent px-2.5 py-[7px] text-xs"
+          >
+            <option value="">Select a workflow</option>
+            {workflows.map((w) => (
+              <option key={w.id} value={w.id}>{w.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* Divider */}
       <div className="border-t border-[--border-subtle]" />
 
@@ -261,7 +290,7 @@ export function ProviderForm({ provider }: ProviderFormProps) {
             size="sm"
             variant="outline"
             onClick={handleFetchModels}
-            disabled={fetching || (!provider.apiKey && provider.protocol !== "kling")}
+            disabled={fetching || (!provider.apiKey && provider.protocol !== "kling" && provider.protocol !== "comfyui")}
           >
             {fetching ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
