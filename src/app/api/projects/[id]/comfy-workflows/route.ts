@@ -73,9 +73,34 @@ export async function POST(
     );
   }
 
+  if (
+    body.projectId !== undefined &&
+    body.projectId !== null &&
+    body.projectId !== projectId
+  ) {
+    return NextResponse.json(
+      { error: "projectId must match the route project or be null" },
+      { status: 400 },
+    );
+  }
+
+  const effectiveProjectId =
+    body.projectId === null ? null : projectId;
+
   let workflow: Record<string, unknown>;
   try {
-    workflow = JSON.parse(body.workflowJson) as Record<string, unknown>;
+    const parsed = JSON.parse(body.workflowJson) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return NextResponse.json(
+        { error: "workflowJson must be a JSON object" },
+        { status: 400 },
+      );
+    }
+    workflow = parsed as Record<string, unknown>;
   } catch {
     return NextResponse.json(
       { error: "workflowJson must be valid JSON" },
@@ -83,12 +108,15 @@ export async function POST(
     );
   }
 
-  const outputNodeId = body.outputNodeId ?? detectOutputNodeId(workflow);
+  const outputNodeId =
+    body.outputNodeId === undefined || body.outputNodeId === ""
+      ? detectOutputNodeId(workflow)
+      : body.outputNodeId;
   const id = genId();
 
   await db.insert(comfyWorkflows).values({
     id,
-    projectId: body.projectId === undefined ? projectId : (body.projectId ?? null),
+    projectId: effectiveProjectId,
     name: body.name,
     capability: body.capability,
     workflowJson: body.workflowJson,
@@ -103,6 +131,11 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: projectId } = await params;
+
+  if (!(await assertProjectOwnership(request, projectId))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
   const { searchParams } = new URL(request.url);
   const workflowId = searchParams.get("workflowId");
 
