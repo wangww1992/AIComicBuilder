@@ -4,12 +4,18 @@ import { comfyWorkflows } from "@/lib/db/schema";
 import { eq, and, isNull, or } from "drizzle-orm";
 import { id as genId } from "@/lib/id";
 import { detectOutputNodeId } from "@/lib/ai/providers/comfyui-workflows";
+import { assertProjectOwnership } from "@/lib/assert-project-ownership";
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: projectId } = await params;
+
+  if (!(await assertProjectOwnership(request, projectId))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
   const { searchParams } = new URL(request.url);
   const capability = searchParams.get("capability") as "image" | "video" | null;
 
@@ -33,6 +39,11 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: projectId } = await params;
+
+  if (!(await assertProjectOwnership(request, projectId))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
   const body = (await request.json()) as {
     name: string;
     capability: "image" | "video";
@@ -41,7 +52,37 @@ export async function POST(
     outputNodeId?: string;
   };
 
-  const workflow = JSON.parse(body.workflowJson) as Record<string, unknown>;
+  if (
+    typeof body.name !== "string" ||
+    body.name.trim() === "" ||
+    typeof body.capability !== "string" ||
+    body.capability.trim() === "" ||
+    typeof body.workflowJson !== "string" ||
+    body.workflowJson.trim() === ""
+  ) {
+    return NextResponse.json(
+      { error: "name, capability, and workflowJson are required" },
+      { status: 400 },
+    );
+  }
+
+  if (body.capability !== "image" && body.capability !== "video") {
+    return NextResponse.json(
+      { error: "capability must be 'image' or 'video'" },
+      { status: 400 },
+    );
+  }
+
+  let workflow: Record<string, unknown>;
+  try {
+    workflow = JSON.parse(body.workflowJson) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json(
+      { error: "workflowJson must be valid JSON" },
+      { status: 400 },
+    );
+  }
+
   const outputNodeId = body.outputNodeId ?? detectOutputNodeId(workflow);
   const id = genId();
 
@@ -69,7 +110,27 @@ export async function DELETE(
     return NextResponse.json({ error: "workflowId required" }, { status: 400 });
   }
 
-  await db.delete(comfyWorkflows).where(eq(comfyWorkflows.id, workflowId));
+  const [existing] = await db
+    .select()
+    .from(comfyWorkflows)
+    .where(eq(comfyWorkflows.id, workflowId));
+
+  if (!existing) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  if (existing.projectId !== null && existing.projectId !== projectId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
+  const [deleted] = await db
+    .delete(comfyWorkflows)
+    .where(eq(comfyWorkflows.id, workflowId))
+    .returning();
+
+  if (!deleted) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   return NextResponse.json({ ok: true });
 }
