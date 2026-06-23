@@ -13,7 +13,7 @@ export async function GET(
   const { id: projectId } = await params;
 
   if (!(await assertProjectOwnership(request, projectId))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   const { searchParams } = new URL(request.url);
@@ -41,7 +41,7 @@ export async function POST(
   const { id: projectId } = await params;
 
   if (!(await assertProjectOwnership(request, projectId))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   const body = (await request.json()) as {
@@ -133,7 +133,7 @@ export async function DELETE(
   const { id: projectId } = await params;
 
   if (!(await assertProjectOwnership(request, projectId))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   const { searchParams } = new URL(request.url);
@@ -148,12 +148,8 @@ export async function DELETE(
     .from(comfyWorkflows)
     .where(eq(comfyWorkflows.id, workflowId));
 
-  if (!existing) {
+  if (!existing || existing.projectId !== projectId) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-
-  if (existing.projectId !== null && existing.projectId !== projectId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   }
 
   const [deleted] = await db
