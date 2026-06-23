@@ -11,6 +11,7 @@ import {
   type Capability,
 } from "@/stores/model-store";
 import { useTranslations } from "next-intl";
+import { apiFetch } from "@/lib/api-fetch";
 import { Loader2, Download, Plus, Eye, EyeOff, Trash2, Search } from "lucide-react";
 
 const DEFAULT_BASE_URLS: Record<Protocol, string> = {
@@ -84,7 +85,7 @@ export function ProviderForm({ provider, projectId }: ProviderFormProps) {
 
   useEffect(() => {
     if (provider.protocol !== "comfyui" || !projectId) return;
-    fetch(`/api/projects/${projectId}/comfy-workflows?capability=${provider.capability}`)
+    apiFetch(`/api/projects/${projectId}/comfy-workflows?capability=${provider.capability}`)
       .then((r) => r.json())
       .then((data) => setWorkflows(data.workflows ?? []))
       .catch(() => setWorkflows([]));

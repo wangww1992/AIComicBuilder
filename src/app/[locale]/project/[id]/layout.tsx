@@ -6,7 +6,7 @@ import { useProjectStore } from "@/stores/project-store";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useLocale } from "next-intl";
-import { ArrowLeft, Loader2, Settings, Wand2 } from "lucide-react";
+import { ArrowLeft, Loader2, Settings, Wand2, Workflow } from "lucide-react";
 import { LogoIcon } from "@/components/logo";
 import { LanguageSwitcher } from "@/components/language-switcher";
 
@@ -67,10 +67,18 @@ export default function ProjectLayout({
             <Wand2 className="h-4 w-4" />
           </Link>
           <Link
-            href={`/${locale}/project/${id}/settings`}
+            href={`/${locale}/settings`}
+            title={t("settings")}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-[--text-muted] transition-all hover:bg-[--surface] hover:text-[--text-primary]"
           >
             <Settings className="h-4 w-4" />
+          </Link>
+          <Link
+            href={`/${locale}/project/${id}/settings`}
+            title="ComfyUI Workflows"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-[--text-muted] transition-all hover:bg-[--surface] hover:text-[--text-primary]"
+          >
+            <Workflow className="h-4 w-4" />
           </Link>
           <LanguageSwitcher />
         </div>

@@ -6,6 +6,7 @@ interface QueueResponse {
 }
 
 interface HistoryEntry {
+  status?: { completed?: boolean; status_str?: string };
   outputs?: Record<string, { images?: Array<{ filename: string }>; videos?: Array<{ filename: string }> }>;
 }
 
@@ -53,6 +54,9 @@ export class ComfyUIClient {
       if (!res.ok) throw new Error(`ComfyUI history fetch failed: ${await res.text()}`);
       const data = (await res.json()) as Record<string, HistoryEntry>;
       const entry = data[promptId];
+      if (entry?.status?.status_str === "error") {
+        throw new Error(`ComfyUI execution failed: ${entry.status.status_str}`);
+      }
       if (entry?.outputs?.[outputNodeId]) {
         const node = entry.outputs[outputNodeId];
         const files = [
