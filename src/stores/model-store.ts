@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { id as genId } from "@/lib/id";
 
-export type Protocol = "openai" | "gemini" | "seedance" | "ucloud-seedance" | "kling" | "wan" | "dashscope" | "minimax" | "anthropic" | "ark";
+export type Protocol = "comfyui" | "openai" | "gemini" | "seedance" | "ucloud-seedance" | "kling" | "wan" | "dashscope" | "minimax" | "anthropic" | "ark";
 export type Capability = "text" | "image" | "video";
 
 export interface Model {
@@ -19,6 +19,7 @@ export interface Provider {
   baseUrl: string;
   apiKey: string;
   secretKey?: string;
+  workflowId?: string;
   models: Model[];
 }
 
@@ -28,9 +29,9 @@ export interface ModelRef {
 }
 
 export interface ModelConfig {
-  text: { protocol: Protocol; baseUrl: string; apiKey: string; secretKey?: string; modelId: string } | null;
-  image: { protocol: Protocol; baseUrl: string; apiKey: string; secretKey?: string; modelId: string } | null;
-  video: { protocol: Protocol; baseUrl: string; apiKey: string; secretKey?: string; modelId: string } | null;
+  text: { protocol: Protocol; baseUrl: string; apiKey: string; secretKey?: string; modelId: string; workflowId?: string } | null;
+  image: { protocol: Protocol; baseUrl: string; apiKey: string; secretKey?: string; modelId: string; workflowId?: string } | null;
+  video: { protocol: Protocol; baseUrl: string; apiKey: string; secretKey?: string; modelId: string; workflowId?: string } | null;
 }
 
 interface ModelStore {
@@ -153,6 +154,7 @@ export const useModelStore = create<ModelStore>()(
             apiKey: provider.apiKey,
             secretKey: provider.secretKey,
             modelId: ref.modelId,
+            workflowId: provider.workflowId,
           };
         }
         return {

@@ -14,6 +14,7 @@ import { useTranslations } from "next-intl";
 import { Loader2, Download, Plus, Eye, EyeOff, Trash2, Search } from "lucide-react";
 
 const DEFAULT_BASE_URLS: Record<Protocol, string> = {
+  comfyui: "http://localhost:8188",
   openai: "https://api.openai.com",
   gemini: "https://generativelanguage.googleapis.com",
   seedance: "https://ark.cn-beijing.volces.com",

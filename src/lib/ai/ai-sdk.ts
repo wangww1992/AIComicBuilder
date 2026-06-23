@@ -9,6 +9,7 @@ export interface ProviderConfig {
   apiKey: string;
   secretKey?: string;
   modelId: string;
+  workflowId?: string;
 }
 
 export interface CreateLanguageModelOptions {
