@@ -11,6 +11,7 @@ import { DashScopeImageProvider } from "./providers/dashscope-image";
 import { MiniMaxImageProvider } from "./providers/minimax-image";
 import { MiniMaxVideoProvider } from "./providers/minimax-video";
 import { ComfyUIImageProvider } from "./providers/comfyui-image";
+import { ComfyUIVideoProvider } from "./providers/comfyui-video";
 import { getAIProvider, getVideoProvider } from "./index";
 import type { AIProvider, VideoProvider } from "./types";
 
@@ -140,6 +141,13 @@ export function createVideoProvider(config: ProviderConfig, uploadDir?: string):
         baseUrl: config.baseUrl,
         model: config.modelId,
         ...(uploadDir && { uploadDir }),
+      });
+    case "comfyui":
+      if (!config.workflowId) throw new Error("ComfyUI provider requires a workflowId");
+      return new ComfyUIVideoProvider({
+        baseUrl: config.baseUrl,
+        workflowId: config.workflowId,
+        uploadDir: uploadDir ?? process.env.UPLOAD_DIR ?? "./uploads",
       });
     default:
       throw new Error(`Unsupported video protocol: ${config.protocol}`);
