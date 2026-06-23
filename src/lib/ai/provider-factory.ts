@@ -10,6 +10,7 @@ import { ArkImageProvider } from "./providers/ark-image";
 import { DashScopeImageProvider } from "./providers/dashscope-image";
 import { MiniMaxImageProvider } from "./providers/minimax-image";
 import { MiniMaxVideoProvider } from "./providers/minimax-video";
+import { ComfyUIImageProvider } from "./providers/comfyui-image";
 import { getAIProvider, getVideoProvider } from "./index";
 import type { AIProvider, VideoProvider } from "./types";
 
@@ -19,6 +20,7 @@ interface ProviderConfig {
   apiKey: string;
   secretKey?: string;
   modelId: string;
+  workflowId?: string;
 }
 
 export interface ModelConfigPayload {
@@ -81,6 +83,13 @@ export function createAIProvider(
         model: config.modelId,
         ...(uploadDir && { uploadDir }),
         ...(textProvider && { textProvider }),
+      });
+    case "comfyui":
+      if (!config.workflowId) throw new Error("ComfyUI provider requires a workflowId");
+      return new ComfyUIImageProvider({
+        baseUrl: config.baseUrl,
+        workflowId: config.workflowId,
+        uploadDir: uploadDir ?? process.env.UPLOAD_DIR ?? "./uploads",
       });
     default:
       throw new Error(`Unsupported AI protocol: ${config.protocol}`);
