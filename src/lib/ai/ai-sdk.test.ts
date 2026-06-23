@@ -31,6 +31,10 @@ import {
   normalizeMiniMaxDuration,
   validateMiniMaxVideoRequest,
 } from "./providers/minimax-video-models.ts";
+import {
+  detectOutputNodeId,
+  substitutePlaceholders,
+} from "./providers/comfyui-workflows.ts";
 import type { AIProvider } from "./types.ts";
 
 const char = (name: string) =>
@@ -571,4 +575,29 @@ test("normalizeMiniMaxDuration: snaps unsupported durations to 6s or 10s", () =>
   // I2V-01 family is 6s-only.
   assert.equal(normalizeMiniMaxDuration("I2V-01-Director", 8), 6);
   assert.equal(normalizeMiniMaxDuration("I2V-01", 10), 6);
+});
+
+// ── ComfyUI workflow utilities ─────────────────────────────────────────
+
+test("detectOutputNodeId: finds SaveImage node", () => {
+  const workflow = {
+    "1": { class_type: "KSampler", inputs: {} },
+    "9": { class_type: "SaveImage", inputs: { filename_prefix: "out" } },
+  };
+  assert.equal(detectOutputNodeId(workflow), "9");
+});
+
+test("detectOutputNodeId: returns null when no output node", () => {
+  const workflow = {
+    "1": { class_type: "KSampler", inputs: {} },
+  };
+  assert.equal(detectOutputNodeId(workflow), null);
+});
+
+test("substitutePlaceholders: replaces prompt placeholder", () => {
+  const workflow = {
+    "6": { inputs: { text: "{{prompt}}" }, class_type: "CLIPTextEncode" },
+  };
+  const result = substitutePlaceholders(workflow, { prompt: "a cat" });
+  assert.equal((result["6"] as { inputs: { text: string } }).inputs.text, "a cat");
 });
