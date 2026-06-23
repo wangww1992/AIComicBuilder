@@ -82,6 +82,7 @@ export function ProviderForm({ provider, projectId }: ProviderFormProps) {
   const [workflows, setWorkflows] = useState<Array<{ id: string; name: string; capability: string }>>([]);
 
   const isKling = provider.protocol === "kling";
+  const isComfyUI = provider.protocol === "comfyui";
 
   useEffect(() => {
     if (provider.protocol !== "comfyui" || !projectId) return;
@@ -226,6 +227,17 @@ export function ProviderForm({ provider, projectId }: ProviderFormProps) {
               </div>
             </div>
           </div>
+        </div>
+      ) : isComfyUI ? (
+        <div className="space-y-1.5">
+          <Label className="text-xs">Base URL</Label>
+          <Input
+            value={provider.baseUrl}
+            onChange={(e) =>
+              updateProvider(provider.id, { baseUrl: e.target.value })
+            }
+            placeholder="http://127.0.0.1:8188"
+          />
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

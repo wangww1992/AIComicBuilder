@@ -15,6 +15,7 @@ import { eq } from "drizzle-orm";
 
 interface ComfyUIImageProviderParams {
   baseUrl: string;
+  apiKey?: string;
   workflowId: string;
   uploadDir: string;
 }
@@ -25,7 +26,7 @@ export class ComfyUIImageProvider implements AIProvider {
   private uploadDir: string;
 
   constructor(params: ComfyUIImageProviderParams) {
-    this.client = new ComfyUIClient(params.baseUrl);
+    this.client = new ComfyUIClient(params.baseUrl, params.apiKey);
     this.workflowId = params.workflowId;
     this.uploadDir = params.uploadDir;
   }

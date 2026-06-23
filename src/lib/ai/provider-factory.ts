@@ -89,6 +89,7 @@ export function createAIProvider(
       if (!config.workflowId) throw new Error("ComfyUI provider requires a workflowId");
       return new ComfyUIImageProvider({
         baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
         workflowId: config.workflowId,
         uploadDir: uploadDir ?? process.env.UPLOAD_DIR ?? "./uploads",
       });
@@ -146,6 +147,7 @@ export function createVideoProvider(config: ProviderConfig, uploadDir?: string):
       if (!config.workflowId) throw new Error("ComfyUI provider requires a workflowId");
       return new ComfyUIVideoProvider({
         baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
         workflowId: config.workflowId,
         uploadDir: uploadDir ?? process.env.UPLOAD_DIR ?? "./uploads",
       });
